@@ -7,6 +7,10 @@ from inventor.connection import get_app
 from inventor.helpers import get_document, get_part_component_def, inventor_tool
 from inventor.units import cm2_to_mm2, cm3_to_mm3, cm_to_mm
 
+# Inventor 2020'nin typelib'i AccuracyEnum sabitlerini disari vermiyor; sayisal
+# kHighAccuracy degerini kullan (varsa sabitten al).
+K_HIGH_ACCURACY = getattr(constants, "kHighAccuracy", 26114)
+
 SURFACE_TYPE_NAMES = {
     constants.kPlaneSurface: "plane",
     constants.kCylinderSurface: "cylinder",
@@ -86,6 +90,31 @@ def edge_summary(edge) -> dict:
     return entry
 
 
+def _body_volume_cm3(body):
+    """Bir govdenin hacmini (cm^3) dondurur.
+
+    SurfaceBody'de 'MassProperties' YOKTUR (o ComponentDefinition uzerindedir);
+    hacim, bir dogruluk (accuracy) argumani alan parametreli 'Volume'
+    ozelliginden okunur.
+    """
+    try:
+        return body.Volume(K_HIGH_ACCURACY)
+    except Exception:
+        return None
+
+
+def _body_area_cm2(body):
+    """Bir govdenin yuzey alanini (cm^2) yuzlerin alanlarini toplayarak hesaplar.
+
+    SurfaceBody'de 'SurfaceArea' ozelligi de bulunmadigi icin her yuzun
+    Evaluator.Area degeri toplanir.
+    """
+    try:
+        return sum(face.Evaluator.Area for face in body.Faces)
+    except Exception:
+        return None
+
+
 def register(mcp):
     @mcp.tool()
     @inventor_tool
@@ -100,15 +129,16 @@ def register(mcp):
         for i in range(1, comp_def.SurfaceBodies.Count + 1):
             body = comp_def.SurfaceBodies.Item(i)
             rb = body.RangeBox
-            mp = body.MassProperties
+            volume_cm3 = _body_volume_cm3(body)
+            area_cm2 = _body_area_cm2(body)
             result.append(
                 {
                     "index": i,
                     "name": body.Name,
                     "face_count": body.Faces.Count,
                     "edge_count": body.Edges.Count,
-                    "volume_mm3": cm3_to_mm3(mp.Volume),
-                    "area_mm2": cm2_to_mm2(mp.Area),
+                    "volume_mm3": None if volume_cm3 is None else cm3_to_mm3(volume_cm3),
+                    "area_mm2": None if area_cm2 is None else cm2_to_mm2(area_cm2),
                     "bounding_box_mm": {
                         "min": _point_mm(rb.MinPoint),
                         "max": _point_mm(rb.MaxPoint),
