@@ -781,7 +781,16 @@ def register(mcp):
     @mcp.tool()
     @inventor_tool
     async def inventor_finish_sketch(sketch: str, doc: str | None = None) -> dict:
-        """Sketch duzenlemeyi sonlandirir ve sketch'teki kapali profil sayisini dondurur."""
+        """Sketch duzenlemeyi sonlandirir ve kati profil icin bulunan kapali
+        ilmek (loop) sayisini dondurur.
+
+        'closed_loops' 0 ise sketch'ten kati olusturulamaz (acik profil). Bu deger
+        gecici bir profil olusturulup (Profiles.AddForSolid) okunduktan sonra
+        silinerek bulunur; sketch'te kalici bir degisiklik yapilmaz. Ham
+        Profiles.Count'u dogrudan okumak ise her zaman 0 verir, cunku profil
+        nesnesi ancak AddForSolid cagrildiginda (yani extrude/revolve sirasinda)
+        olusturulur.
+        """
         app = get_app()
         document = get_document(app, doc)
         sk = get_sketch(document, sketch)
@@ -789,4 +798,20 @@ def register(mcp):
             sk.ExitEdit()
         except (pywintypes.com_error, AttributeError):
             pass
-        return {"sketch": sk.Name, "profile_count": sk.Profiles.Count}
+
+        closed_loops = 0
+        try:
+            profile = sk.Profiles.AddForSolid()
+            closed_loops = profile.Count
+            try:
+                profile.Delete()
+            except (pywintypes.com_error, AttributeError):
+                pass
+        except (pywintypes.com_error, AttributeError):
+            closed_loops = 0
+
+        return {
+            "sketch": sk.Name,
+            "closed_loops": closed_loops,
+            "profile_count": sk.Profiles.Count,
+        }
