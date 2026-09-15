@@ -99,6 +99,61 @@ def _resolve_edges(app, comp_def, edge_refs: list[str] | None):
     return _edge_collection(app, [registry.resolve(ref) for ref in edge_refs])
 
 
+def _apply_affected_bodies(app, comp_def, definition, affected_bodies: list[int] | None):
+    """join/cut/intersect islemlerinin hangi govdeleri etkileyecegini belirler.
+
+    Inventor'un varsayilani SADECE ILK govdedir. Cok govdeli bir partta bu sessizce
+    yanlis sonuc verir: yeni malzeme, gercekte kestigi/dokundugu govdelerle
+    birlesmek yerine 1. govdeye eklenir ve geri kalanlarla ic ice gecmis
+    (interference) ayri govdeler olusur. Bu yuzden hedef govdeler acikca verilebilir.
+    """
+    if not affected_bodies:
+        return
+    bodies = [comp_def.SurfaceBodies.Item(i) for i in affected_bodies]
+    definition.AffectedBodies = _object_collection(app, bodies)
+
+
+def _combine_into(app, comp_def, targets, tool_body, op):
+    """tool_body'yi hedef govdelere Combine ile uygular.
+
+    join: tum hedefler + tool tek govdede birlesir.
+    cut/intersect: her hedefe ayri ayri uygulanir (tool son adima kadar korunur).
+    """
+    combine_features = win32com.client.dynamic.Dispatch(comp_def.Features.CombineFeatures._oleobj_)
+    if op == constants.kJoinOperation:
+        tools = _object_collection(app, list(targets[1:]) + [tool_body])
+        combine_features.Add(targets[0], tools, op, False)
+        return
+    for idx, target in enumerate(targets):
+        keep = idx < len(targets) - 1
+        combine_features.Add(target, _object_collection(app, [tool_body]), op, keep)
+
+
+def _new_body_then_combine(app, comp_def, affected_bodies, op, make_feature):
+    """Definition nesnesi olmayan feature'lar icin AffectedBodies esdegeri.
+
+    Inventor 2020'de RevolveFeatures'in CreateRevolveDefinition'i (ve dolayisiyla
+    AffectedBodies'i) yoktur; AddFull/AddByAngle sadece bir operation alir ve
+    join/cut yine SADECE ilk govdeyi etkiler. Bu yuzden feature once AYRI bir
+    govde olarak olusturulur, sonra Combine ile istenen govdelere uygulanir.
+    """
+    targets = [comp_def.SurfaceBodies.Item(i) for i in affected_bodies]
+    names_before = {b.Name for b in comp_def.SurfaceBodies}
+
+    feature = make_feature(constants.kNewBodyOperation)
+
+    tool_body = None
+    for b in comp_def.SurfaceBodies:
+        if b.Name not in names_before:
+            tool_body = b
+            break
+    if tool_body is None:
+        tool_body = comp_def.SurfaceBodies.Item(comp_def.SurfaceBodies.Count)
+
+    _combine_into(app, comp_def, targets, tool_body, op)
+    return feature
+
+
 def _feature_summary(feature) -> dict:
     return {"name": feature.Name, "type": feature.Type if hasattr(feature, "Type") else feature.__class__.__name__}
 
@@ -112,6 +167,7 @@ def register(mcp):
         operation: str = "join",
         direction: str = "positive",
         taper_deg: float = 0.0,
+        affected_bodies: list[int] | None = None,
         doc: str | None = None,
     ) -> dict:
         """Sketch profilini extrude ederek bir feature olusturur.
@@ -119,6 +175,10 @@ def register(mcp):
         operation: 'join', 'cut', 'intersect', 'new_body'.
         direction: 'positive', 'negative', 'symmetric'.
         taper_deg: opsiyonel taslama acisi (derece).
+        affected_bodies: join/cut/intersect'in etkileyecegi govdelerin 1 tabanli
+        indeksleri (inventor_list_bodies). Verilmezse Inventor SADECE ILK govdeyi
+        etkiler; cok govdeli partlarda bu neredeyse her zaman istenmeyen sonuc
+        verir, bu yuzden govde sayisi birden fazlaysa acikca belirtin.
         """
         app = get_app()
         document = get_document(app, doc)
@@ -134,6 +194,7 @@ def register(mcp):
         if taper_deg:
             ext_def.TaperAngle = deg_to_rad(taper_deg)
         ext_def.SetDistanceExtent(mm_to_cm(distance_mm), dir_enum)
+        _apply_affected_bodies(app, comp_def, ext_def, affected_bodies)
         feature = ext_features.Add(ext_def)
         return {"name": feature.Name, "type": "extrude"}
 
@@ -144,12 +205,18 @@ def register(mcp):
         axis: str,
         angle_deg: float = 360.0,
         operation: str = "join",
+        affected_bodies: list[int] | None = None,
         doc: str | None = None,
     ) -> dict:
         """Sketch profilini bir eksen etrafinda dondurerek (revolve) feature olusturur.
 
         axis: bir entity_id (sketch cizgisi) veya work axis adi (orn. 'Y Axis').
         angle_deg: 360 ise tam tur, aksi halde belirtilen aci kadar.
+        affected_bodies: bkz. inventor_extrude - verilmezse Inventor sadece ilk
+        govdeyi etkiler. Revolve'da bu, feature'i once ayri bir govde olarak
+        olusturup Combine ile uygulayarak saglanir (Inventor 2020'de revolve'un
+        AffectedBodies destegi yoktur), yani feature agacinda ek bir Combine
+        gorunur.
         """
         app = get_app()
         document = get_document(app, doc)
@@ -161,10 +228,19 @@ def register(mcp):
 
         profile = sk.Profiles.AddForSolid()
         rev_features = comp_def.Features.RevolveFeatures
-        if angle_deg >= 360.0:
-            feature = rev_features.AddFull(profile, axis_entity, op)
+
+        def _make(operation_enum):
+            if angle_deg >= 360.0:
+                return rev_features.AddFull(profile, axis_entity, operation_enum)
+            return rev_features.AddByAngle(
+                profile, axis_entity, deg_to_rad(angle_deg),
+                constants.kPositiveExtentDirection, operation_enum,
+            )
+
+        if affected_bodies and op != constants.kNewBodyOperation:
+            feature = _new_body_then_combine(app, comp_def, affected_bodies, op, _make)
         else:
-            feature = rev_features.AddByAngle(profile, axis_entity, deg_to_rad(angle_deg), constants.kPositiveExtentDirection, op)
+            feature = _make(op)
         return {"name": feature.Name, "type": "revolve"}
 
     @mcp.tool()
