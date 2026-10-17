@@ -17,8 +17,8 @@ An [MCP](https://modelcontextprotocol.io) server that bridges Claude (or any MCP
 - **Parameters** — list, read, set, and create model parameters.
 - **Properties** — iProperties and mass properties (volume, mass, center of gravity, etc.).
 - **Geometry inspection** — list bodies, faces, edges, and bounding boxes.
-- **Assemblies** — place/ground/position components, add and inspect mate constraints, rectangular/circular component patterns, bill of materials.
-- **Joints** — rigid, rotational, slider, cylindrical, planar, and ball assembly joints with optional angular/linear limits; list, delete, and drive joints to test motion.
+- **Assemblies** — place/ground/position components, inspect a single occurrence's position and rotation, add and inspect mate constraints, rectangular/circular component patterns, bill of materials.
+- **Joints** — rigid, rotational, slider, cylindrical, planar, and ball assembly joints with optional angular/linear limits; joints keep already-placed parts where they are by default; list, delete, and drive joints to test motion; automatically joint screws/pins/washers to the parts they sit on.
 - **Drawings** — sheets, base/projected views, dimensions, parts lists, title block fields.
 - **Appearances** — list and apply visual styles/materials.
 - **Document & app control** — new/open/save/close documents, active document switching, status checks.
@@ -98,6 +98,17 @@ inventor_assembly_drive_joint(name="Rotational:1", angle_deg=45)
 ```
 
 `point_one`/`point_two` (`start`, `mid`, `end`, `center`) pick the joint origin: a point on an edge, a point on the axis of a cylindrical/conical face, or the center of a planar face (`center` only). Angular limits and `angle_deg` apply to rotational and cylindrical joints; linear limits and `linear_mm` apply to slider and cylindrical joints. A joint driven outside its limits reports `health: "invalid_limits"`.
+
+By default (`preserve_position=True`) `inventor_assembly_add_joint` keeps already-placed parts where they are. If a rigid joint would move the part, it tries the other `flip_alignment`/`flip_origin` combinations. If only an in-plane rotation remains (common with circular edges), it creates a rotational joint locked at that angle instead, named `<name>_locked`. The result's `preserve_position` field reports the final joint type, the flips used and the residual error in mm/deg. Pass `preserve_position=False` to apply the requested flips as-is.
+
+To joint fasteners in bulk, preview first, then apply:
+
+```text
+inventor_assembly_auto_joint_fasteners()                     # dry run: fastener, partner, edge ids, radius, seat
+inventor_assembly_auto_joint_fasteners(skip=["pin:3"], dry_run=False)
+```
+
+Occurrences whose names match `name_filter` (regex, default `screw|pin|washer`) are matched to a coaxial, coplanar circular edge on another occurrence. A head-underside-on-seat contact is preferred. Fasteners that already have joints or constraints are skipped, and duplicates (same file, identical position) are reported.
 
 ## Architecture notes
 
