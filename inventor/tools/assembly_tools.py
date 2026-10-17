@@ -41,6 +41,11 @@ def _resolve_occurrence(comp_def, ref: str):
 _ASM_ENTITY_ID = re.compile(r"^(?P<doc>.+?):_asm_(?P<occ>.+)_(?P<group>faces|edges):(?:face|edge)(?P<idx>\d+)$")
 
 
+def occurrence_entity_id(document, occurrence: str, kind: str, index: int) -> str:
+    """Listeleme araclarinin urettigi bicimde id olusturur (kind: 'face'/'edge', index 1'den baslar)."""
+    return f"{document.DisplayName}:_asm_{occurrence}_{kind}s:{kind}{index - 1}"
+
+
 def resolve_entity(document, comp_def, entity_id: str):
     """Bir occurrence yuz/kenar entity_id'sini COM nesnesine cevirir.
 

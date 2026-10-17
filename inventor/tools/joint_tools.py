@@ -6,13 +6,14 @@ occurrence'i entity_two'ya tasir (UI'daki "ilk secim ikinciye tasinir" davranisi
 """
 
 import math
+import re
 
 import pywintypes
 from win32com.client import CastTo, constants
 
 from inventor.connection import get_app
-from inventor.helpers import get_assembly_component_def, get_document, inventor_tool
-from inventor.tools.assembly_tools import resolve_entity
+from inventor.helpers import format_com_error, get_assembly_component_def, get_document, inventor_tool
+from inventor.tools.assembly_tools import occurrence_entity_id, resolve_entity
 from inventor.units import cm_to_mm, deg_to_rad, mm_to_cm, rad_to_deg
 
 # AssemblyJointTypeEnum. Not: slider icin tip kutuphanesindeki ad kSlideJointType'dir.
@@ -202,19 +203,23 @@ def _snapshot(occurrences) -> list:
     return [(occ, occ.Transformation) for occ in occurrences if occ is not None]
 
 
+def _transform_delta(before, after) -> tuple[float, float, bool]:
+    """Iki Matrix arasindaki fark: (konum mm, aci derece, tolerans icinde mi)."""
+    tb, ta = before.Translation, after.Translation
+    dist_mm = cm_to_mm(math.dist((tb.X, tb.Y, tb.Z), (ta.X, ta.Y, ta.Z)))
+    diffs = [before.Cell(r, c) - after.Cell(r, c) for r in range(1, 4) for c in range(1, 4)]
+    # ||R1 - R2||_F = 2*sqrt(2)*sin(theta/2)
+    fro = math.sqrt(sum(d * d for d in diffs))
+    angle = math.degrees(2 * math.asin(min(1.0, fro / (2 * math.sqrt(2)))))
+    return dist_mm, angle, dist_mm <= _POS_TOL_MM and max(abs(d) for d in diffs) <= _ROT_TOL
+
+
 def _residual(snapshot) -> tuple[float, float, bool]:
     """Snapshot'tan bu yana en cok kayan occurrence icin (konum mm, aci derece, tolerans icinde mi)."""
     pos_mm, rot_deg, ok = 0.0, 0.0, True
     for occ, before in snapshot:
-        after = occ.Transformation
-        tb, ta = before.Translation, after.Translation
-        dist_mm = cm_to_mm(math.dist((tb.X, tb.Y, tb.Z), (ta.X, ta.Y, ta.Z)))
-        diffs = [before.Cell(r, c) - after.Cell(r, c) for r in range(1, 4) for c in range(1, 4)]
-        # ||R1 - R2||_F = 2*sqrt(2)*sin(theta/2)
-        fro = math.sqrt(sum(d * d for d in diffs))
-        angle = math.degrees(2 * math.asin(min(1.0, fro / (2 * math.sqrt(2)))))
-        pos_mm, rot_deg = max(pos_mm, dist_mm), max(rot_deg, angle)
-        ok = ok and dist_mm <= _POS_TOL_MM and max(abs(d) for d in diffs) <= _ROT_TOL
+        dist_mm, angle, within = _transform_delta(before, occ.Transformation)
+        pos_mm, rot_deg, ok = max(pos_mm, dist_mm), max(rot_deg, angle), ok and within
     return pos_mm, rot_deg, ok
 
 
@@ -316,6 +321,81 @@ def _add_joint(
     if name:
         j.Name = name
     return finish(j, "rigid", bfa, bfo, res)
+
+
+# Baglanti elemani eslestirme: merkez toleransi 0.01 mm, normal paralellik toleransi.
+_DEFAULT_FASTENER_FILTER = r"screw|pin|washer"
+_CENTER_TOL_CM = mm_to_cm(0.01)
+_PARALLEL_TOL = 1e-6
+
+
+def _dot(a, b) -> float:
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def _circle_edges(occ) -> list[dict]:
+    """Occurrence govdesinin (body 1) tam daire kenarlari, montaj uzayinda (cm)."""
+    try:
+        bodies = occ.SurfaceBodies
+        if bodies.Count == 0:
+            return []
+        edges = bodies.Item(1).Edges
+    except pywintypes.com_error:
+        return []
+    result = []
+    for i in range(1, edges.Count + 1):
+        edge = edges.Item(i)
+        try:
+            if edge.GeometryType != constants.kCircleCurve:
+                continue
+            geo = edge.Geometry
+            if geo is None:
+                continue
+            c, n = geo.Center, geo.Normal
+            result.append({"index": i, "edge": edge, "center": (c.X, c.Y, c.Z), "normal": (n.X, n.Y, n.Z), "radius": geo.Radius})
+        except pywintypes.com_error:
+            continue
+    return result
+
+
+def _box_contains_any(box, points) -> bool:
+    lo, hi = box.MinPoint, box.MaxPoint
+    t = _CENTER_TOL_CM
+    return any(
+        lo.X - t <= x <= hi.X + t and lo.Y - t <= y <= hi.Y + t and lo.Z - t <= z <= hi.Z + t
+        for x, y, z in points
+    )
+
+
+def _planar_outward_normals(edge) -> list[tuple]:
+    """Kenara komsu duzlemsel yuzlerin govdeden disari bakan normalleri."""
+    normals = []
+    for face in edge.Faces:
+        try:
+            if face.SurfaceType != constants.kPlaneSurface:
+                continue
+            p = face.PointOnFace
+            _, n = face.Evaluator.GetNormalAtPoint([p.X, p.Y, p.Z], [0.0, 0.0, 0.0])
+            normals.append(tuple(n[:3]))
+        except pywintypes.com_error:
+            continue
+    return normals
+
+
+def _seat_score(fc: dict, pc: dict) -> int:
+    """2: duzlemsel yuzler karsi karsiya (bas alti / oturma yuzu temasi), 1: ikisi de duzlemsel, 0: diger."""
+    n1, n2 = _planar_outward_normals(fc["edge"]), _planar_outward_normals(pc["edge"])
+    if any(_dot(a, b) <= -1 + _PARALLEL_TOL for a in n1 for b in n2):
+        return 2
+    return 1 if n1 and n2 else 0
+
+
+def _same_seat_circle(fc: dict, pc: dict) -> bool:
+    """Ayni merkez (0.01 mm) ve paralel normal: es eksenli ve ayni duzlemde iki daire."""
+    return (
+        math.dist(fc["center"], pc["center"]) <= _CENTER_TOL_CM
+        and abs(_dot(fc["normal"], pc["normal"])) >= 1 - _PARALLEL_TOL
+    )
 
 
 def register(mcp):
@@ -434,3 +514,122 @@ def register(mcp):
                 raise LookupError(f"'{kind}' joint'i dogrusal pozisyon desteklemiyor (slider, cylindrical).")
         document.Update()
         return _joint_summary(j)
+
+    @mcp.tool()
+    @inventor_tool
+    async def inventor_assembly_auto_joint_fasteners(
+        doc: str | None = None,
+        name_filter: str | None = None,
+        skip: list[str] | None = None,
+        dry_run: bool = True,
+    ) -> dict:
+        """Baglanti elemanlarini (vida/pim/pul) oturduklari parcaya rigid joint ile baglar.
+
+        Adi name_filter ile eslesen (regex, buyuk/kucuk harf duyarsiz; varsayilan
+        'screw|pin|washer') her en ust seviye occurrence icin: daire kenarlarindan biriyle
+        ayni merkezde (0.01 mm) ve paralel normalli, BASKA bir occurrence'a ait daire kenari
+        aranir. Duzlemsel yuzleri karsi karsiya olan cift (bas alti / oturma yuzu) tercih edilir.
+        dry_run=True (varsayilan): hicbir sey degistirmeden eslesme tablosunu dondurur
+        (fastener, partner, iki kenarin entity_id'si, yaricap, seat).
+        dry_run=False: her eslesme icin preserve_position mantigiyla rigid joint olusturur
+        ve parca bazinda sonucu dondurur.
+        skip: atlanacak occurrence adlari. Ayni dosyadan ayni konumda iki occurrence
+        'duplicates' altinda raporlanir ve atlanir; zaten joint/kisitlamasi olan elemanlar
+        'skipped' altinda raporlanir. Sadece govde 1 ve en ust seviye occurrence'lar taranir.
+        """
+        app = get_app()
+        document = get_document(app, doc)
+        comp_def = get_assembly_component_def(document)
+        try:
+            pattern = re.compile(name_filter or _DEFAULT_FASTENER_FILTER, re.IGNORECASE)
+        except re.error as e:
+            raise LookupError(f"Gecersiz name_filter: '{name_filter}' ({e}).")
+        skip_names = set(skip or [])
+
+        occurrences = comp_def.Occurrences
+        occs = [occurrences.Item(i) for i in range(1, occurrences.Count + 1)]
+        occs = [o for o in occs if not o.Suppressed]
+
+        skipped, duplicates, candidates, seen = [], [], [], []
+        for occ in occs:
+            if not pattern.search(occ.Name):
+                continue
+            if occ.Name in skip_names:
+                skipped.append({"occurrence": occ.Name, "reason": "skip"})
+                continue
+            file_name = occ.ReferencedFileDescriptor.FullFileName
+            transform = occ.Transformation
+            original = next((o for o, f, m in seen if f == file_name and _transform_delta(m, transform)[2]), None)
+            if original is not None:
+                duplicates.append({"occurrence": occ.Name, "duplicate_of": original.Name})
+                continue
+            seen.append((occ, file_name, transform))
+            if occ.Joints.Count or occ.Constraints.Count:
+                skipped.append({"occurrence": occ.Name, "reason": "already_constrained"})
+                continue
+            candidates.append(occ)
+
+        duplicate_names = {d["occurrence"] for d in duplicates}
+        partner_circles = {}
+        matches, unmatched = [], []
+        for occ in candidates:
+            circles = _circle_edges(occ)
+            centers = [c["center"] for c in circles]
+            best = None
+            for other in occs:
+                if other.Name == occ.Name or other.Name in duplicate_names or not centers:
+                    continue
+                if not _box_contains_any(other.RangeBox, centers):
+                    continue
+                if other.Name not in partner_circles:
+                    partner_circles[other.Name] = _circle_edges(other)
+                for pc in partner_circles[other.Name]:
+                    for fc in circles:
+                        if not _same_seat_circle(fc, pc):
+                            continue
+                        key = (_seat_score(fc, pc), -abs(fc["radius"] - pc["radius"]))
+                        if best is None or key > best[0]:
+                            best = (key, fc, other, pc)
+            if best is None:
+                unmatched.append(occ.Name)
+                continue
+            (score, _), fc, other, pc = best
+            matches.append(
+                {
+                    "fastener": occ.Name,
+                    "partner": other.Name,
+                    "fastener_edge": occurrence_entity_id(document, occ.Name, "edge", fc["index"]),
+                    "partner_edge": occurrence_entity_id(document, other.Name, "edge", pc["index"]),
+                    "radius_mm": cm_to_mm(fc["radius"]),
+                    "seat": score == 2,
+                    "_edges": (fc["edge"], pc["edge"]),
+                }
+            )
+
+        if not dry_run:
+            for row in matches:
+                fastener_edge, partner_edge = row["_edges"]
+                try:
+                    j, info = _add_joint(document, comp_def, "rigid", fastener_edge, partner_edge)
+                    row.update(
+                        joint=j.Name,
+                        final_type=info["final_type"],
+                        fallback=info["fallback"],
+                        preserved=info["preserved"],
+                        residual_mm=info["residual_mm"],
+                        residual_deg=info["residual_deg"],
+                    )
+                except pywintypes.com_error as e:
+                    row["error"] = format_com_error(e)
+                except LookupError as e:
+                    row["error"] = str(e)
+        for row in matches:
+            del row["_edges"]
+
+        return {
+            "dry_run": dry_run,
+            "matches": matches,
+            "unmatched": unmatched,
+            "skipped": skipped,
+            "duplicates": duplicates,
+        }
