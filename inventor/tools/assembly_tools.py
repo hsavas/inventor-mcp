@@ -134,6 +134,25 @@ def register(mcp):
 
     @mcp.tool()
     @inventor_tool
+    async def inventor_assembly_get_occurrence(name: str, doc: str | None = None) -> dict:
+        """Tek bir occurrence'in konumunu (mm), tam rotasyonunu, grounded/suppressed durumunu dondurur.
+
+        rotation: occ.Transformation'in 3x3 rotasyon kismi, satir satir; sutunlar
+        occurrence'in X/Y/Z eksenlerinin montaj uzayindaki yonleridir.
+        Tum listeyi cekmeden tek parcayi kontrol etmek icin `inventor_assembly_list_occurrences`
+        yerine kullanilabilir.
+        """
+        app = get_app()
+        document = get_document(app, doc)
+        comp_def = get_assembly_component_def(document)
+        occ = _resolve_occurrence(comp_def, name)
+        entry = _occurrence_summary(occ)
+        m = occ.Transformation
+        entry["rotation"] = [[m.Cell(r, c) for c in range(1, 4)] for r in range(1, 4)]
+        return entry
+
+    @mcp.tool()
+    @inventor_tool
     async def inventor_assembly_set_grounded(occurrence: str, grounded: bool = True, doc: str | None = None) -> dict:
         """Bir occurrence'in sabitlenmis (grounded) durumunu ayarlar."""
         app = get_app()
