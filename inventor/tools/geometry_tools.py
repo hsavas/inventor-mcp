@@ -1,5 +1,6 @@
 """Govde/yuz/kenar sorgulama araclari."""
 
+import pywintypes
 from win32com.client import CastTo, constants
 
 from inventor import registry
@@ -41,13 +42,23 @@ def _vector_xyz(v) -> list:
 
 
 def face_summary(face) -> dict:
-    """Bir Face nesnesi icin yuzey turu, alan (mm^2) ve turune ozgu geometriyi dondurur."""
-    surface_type = face.SurfaceType
+    """Bir Face nesnesi icin yuzey turu, alan (mm^2) ve turune ozgu geometriyi dondurur.
+
+    Evaluator/Geometry'si okunamayan yuzeyler icin hata firlatmak yerine
+    surface_type 'unknown' ve area_mm2 None dondurur.
+    """
+    try:
+        surface_type = face.SurfaceType
+        evaluator = face.Evaluator
+        geo = face.Geometry
+    except pywintypes.com_error:
+        return {"surface_type": "unknown", "area_mm2": None}
+    if evaluator is None or geo is None:
+        return {"surface_type": "unknown", "area_mm2": None}
     entry = {
         "surface_type": SURFACE_TYPE_NAMES.get(surface_type, str(surface_type)),
-        "area_mm2": cm2_to_mm2(face.Evaluator.Area),
+        "area_mm2": cm2_to_mm2(evaluator.Area),
     }
-    geo = face.Geometry
     if surface_type == constants.kPlaneSurface:
         pl = CastTo(geo, "Plane")
         entry["normal"] = _vector_xyz(pl.Normal)
@@ -56,20 +67,31 @@ def face_summary(face) -> dict:
         cy = CastTo(geo, "Cylinder")
         entry["radius_mm"] = cm_to_mm(cy.Radius)
         entry["axis"] = _vector_xyz(cy.AxisVector)
+        entry["base_point_mm"] = _point_mm(cy.BasePoint)
     return entry
 
 
 def edge_summary(edge) -> dict:
-    """Bir Edge nesnesi icin egri turu, uzunluk (mm) ve turune ozgu geometriyi dondurur."""
-    curve_type = edge.GeometryType
-    evaluator = edge.Evaluator
-    min_param, max_param = evaluator.GetParamExtents()
-    length_cm = evaluator.GetLengthAtParam(min_param, max_param)
+    """Bir Edge nesnesi icin egri turu, uzunluk (mm) ve turune ozgu geometriyi dondurur.
+
+    Bazi kenarlarda (dis/helis iceren vidalar, bazi ice aktarilmis SolidWorks
+    govdeleri) Evaluator veya Geometry None donebiliyor; tum listeyi bozmak
+    yerine bu kenarlar curve_type 'unknown' ve length_mm None ile raporlanir.
+    """
+    try:
+        curve_type = edge.GeometryType
+        evaluator = edge.Evaluator
+        geo = edge.Geometry
+        if evaluator is None or geo is None:
+            return {"curve_type": "unknown", "length_mm": None}
+        min_param, max_param = evaluator.GetParamExtents()
+        length_cm = evaluator.GetLengthAtParam(min_param, max_param)
+    except pywintypes.com_error:
+        return {"curve_type": "unknown", "length_mm": None}
     entry = {
         "curve_type": CURVE_TYPE_NAMES.get(curve_type, str(curve_type)),
         "length_mm": cm_to_mm(length_cm),
     }
-    geo = edge.Geometry
     # geo zaten win32com tarafindan dogru somut tipte (LineSegment3d/Circle3d/Arc3d
     # vb.) dondurulur; CastTo cagirmak farkli Inventor surumlerinde arayuz adi
     # uyusmazligi yuzunden hata verebiliyor (bkz. slot insasinda da karsilasilan
@@ -121,7 +143,8 @@ def register(mcp):
     @inventor_tool
     async def inventor_list_faces(body_index: int = 1, doc: str | None = None) -> list[dict]:
         """Bir govdenin tum yuzeylerini listeler: entity_id, yuzey turu, alan (mm^2) ve
-        turune ozgu geometri (duzlem icin normal+kok nokta, silindir icin yaricap+eksen)."""
+        turune ozgu geometri (duzlem icin normal+kok nokta, silindir icin yaricap+eksen+
+        eksen uzerindeki base_point_mm)."""
         app = get_app()
         document = get_document(app, doc)
         comp_def = get_part_component_def(document)

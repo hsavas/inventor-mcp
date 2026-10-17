@@ -1,5 +1,7 @@
 """Montaj (assembly) araclari: parca yerlestirme, kisitlamalar, pattern, BOM."""
 
+import re
+
 import pywintypes
 from win32com.client import CastTo, constants
 
@@ -32,6 +34,34 @@ def _resolve_occurrence(comp_def, ref: str):
         return comp_def.Occurrences.ItemByName(ref)
     except pywintypes.com_error:
         raise LookupError(f"'{ref}' adli occurrence bulunamadi.")
+
+
+# inventor_assembly_list_occurrence_faces/_edges'in urettigi id bicimi:
+# "<dokuman>:_asm_<occurrence>_faces:face<n>" (n, 0'dan baslayan yuz/kenar sirasi).
+_ASM_ENTITY_ID = re.compile(r"^(?P<doc>.+?):_asm_(?P<occ>.+)_(?P<group>faces|edges):(?:face|edge)(?P<idx>\d+)$")
+
+
+def resolve_entity(document, comp_def, entity_id: str):
+    """Bir occurrence yuz/kenar entity_id'sini COM nesnesine cevirir.
+
+    Id bu oturumda listelenmemisse (orn. sunucu yeniden basladiysa) id'deki
+    occurrence adi ve sira numarasi ile yuz/kenar dogrudan govdeden alinir.
+    """
+    try:
+        return registry.resolve(entity_id)
+    except LookupError:
+        m = _ASM_ENTITY_ID.match(entity_id)
+        if not m or m["doc"] != document.DisplayName:
+            raise LookupError(
+                f"Bilinmeyen entity_id: '{entity_id}'. Once 'inventor_assembly_list_occurrence_faces' "
+                f"veya '_edges' ile '{document.DisplayName}' dokumaninda listeleyin."
+            )
+    body = _resolve_occurrence(comp_def, m["occ"]).SurfaceBodies.Item(1)
+    items = body.Faces if m["group"] == "faces" else body.Edges
+    idx = int(m["idx"]) + 1
+    if idx > items.Count:
+        raise LookupError(f"Bilinmeyen entity_id: '{entity_id}' (occurrence'ta {items.Count} oge var).")
+    return items.Item(idx)
 
 
 def _object_collection(app, items):
@@ -150,7 +180,9 @@ def register(mcp):
     async def inventor_assembly_list_occurrence_faces(occurrence: str, doc: str | None = None) -> list[dict]:
         """Bir occurrence'in (montaj uzayindaki) govdesinin tum yuzeylerini listeler.
 
-        Donen entity_id'ler `inventor_assembly_add_constraint` icin kullanilabilir.
+        Donen entity_id'ler `inventor_assembly_add_constraint` ve
+        `inventor_assembly_add_joint` icin kullanilabilir. Silindirik yuzeyler icin
+        eksen uzerindeki base_point_mm, ayni yaricapli delikleri ayirt etmeye yarar.
         """
         app = get_app()
         document = get_document(app, doc)
@@ -175,7 +207,9 @@ def register(mcp):
     async def inventor_assembly_list_occurrence_edges(occurrence: str, doc: str | None = None) -> list[dict]:
         """Bir occurrence'in (montaj uzayindaki) govdesinin tum kenarlarini listeler.
 
-        Donen entity_id'ler pattern araclarinda eksen/kenar referansi olarak kullanilabilir.
+        Donen entity_id'ler pattern araclarinda eksen/kenar referansi olarak ve
+        `inventor_assembly_add_joint` / `inventor_assembly_add_constraint` icin
+        kullanilabilir.
         """
         app = get_app()
         document = get_document(app, doc)
@@ -211,7 +245,8 @@ def register(mcp):
 
         constraint_type: 'mate', 'flush', 'angle', 'insert', 'tangent'.
         entity_one/entity_two: `inventor_assembly_list_occurrence_faces` (veya edges)
-        ile alinan entity_id'ler.
+        ile alinan entity_id'ler. Bu oturumda listelenmemis id'ler de (orn. sunucu
+        yeniden basladiktan sonra) occurrence govdesinden yeniden cozulur.
         offset_mm: mate/flush/insert/tangent icin ofset (mm).
         angle_deg: angle kisitlamasi icin aci (derece).
         axes_opposed: insert kisitlamasi icin eksenlerin zit yonlu olup olmadigi.
@@ -220,8 +255,8 @@ def register(mcp):
         app = get_app()
         document = get_document(app, doc)
         comp_def = get_assembly_component_def(document)
-        ent1 = registry.resolve(entity_one)
-        ent2 = registry.resolve(entity_two)
+        ent1 = resolve_entity(document, comp_def, entity_one)
+        ent2 = resolve_entity(document, comp_def, entity_two)
         constraints = comp_def.Constraints
 
         kind = constraint_type.lower()
