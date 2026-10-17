@@ -7,7 +7,15 @@ from win32com.client import constants
 
 from inventor import registry
 from inventor.connection import get_app
-from inventor.helpers import get_document, get_feature, get_part_component_def, get_sketch, inventor_tool
+from inventor.helpers import (
+    get_document,
+    get_feature,
+    get_part_component_def,
+    get_sketch,
+    get_sketch3d,
+    inventor_tool,
+    point3d,
+)
 from inventor.units import deg_to_rad, mm_to_cm
 
 OPERATION_MAP = {
@@ -261,17 +269,34 @@ def register(mcp):
 
     def _resolve_path_curve(document, comp_def, path_ref: str):
         """path_ref bir entity_id (kayitli cizgi/yay/spline) ise onu, degilse bir
-        sketch adi olarak yorumlayip o sketch'teki ilk egriyi dondurur."""
+        (2D veya 3D) sketch adi olarak yorumlayip o sketch'teki ilk egriyi dondurur.
+
+        Once 2D PlanarSketch olarak dener (SketchLines/SketchArcs/SketchSplines),
+        bulunamazsa Sketch3D olarak dener (SketchLines3D/SketchSplines3D) - bu
+        sonuncusu, eksen-hizali olmayan keyfi yonelimli 3B yollar (orn. bir
+        kurenin yuzeyini takip eden geodezik/buyuk-cember yaylar) icin kullanilir.
+        """
         try:
             return registry.resolve(path_ref)
         except LookupError:
             pass
-        sk = get_sketch(document, path_ref)
-        for coll_name in ("SketchLines", "SketchArcs", "SketchSplines"):
-            coll = getattr(sk, coll_name)
-            if coll.Count > 0:
-                return coll.Item(1)
-        raise LookupError(f"'{path_ref}' bir entity_id veya icinde egrisi olan bir sketch adi olarak bulunamadi.")
+        try:
+            sk = get_sketch(document, path_ref)
+            for coll_name in ("SketchLines", "SketchArcs", "SketchSplines"):
+                coll = getattr(sk, coll_name)
+                if coll.Count > 0:
+                    return coll.Item(1)
+        except LookupError:
+            pass
+        try:
+            sk3d = get_sketch3d(document, path_ref)
+            for coll_name in ("SketchLines3D", "SketchSplines3D"):
+                coll = getattr(sk3d, coll_name)
+                if coll.Count > 0:
+                    return coll.Item(1)
+        except LookupError:
+            pass
+        raise LookupError(f"'{path_ref}' bir entity_id veya icinde egrisi olan bir 2D/3D sketch adi olarak bulunamadi.")
 
     @mcp.tool()
     @inventor_tool
@@ -618,6 +643,72 @@ def register(mcp):
             new_plane.Name = name
         entity_id = registry.register(document.DisplayName, "_workfeatures", "plane", new_plane)
         return {"entity_id": entity_id, "name": new_plane.Name}
+
+    @mcp.tool()
+    @inventor_tool
+    async def inventor_create_work_plane_three_points(
+        x1: float, y1: float, z1: float,
+        x2: float, y2: float, z2: float,
+        x3: float, y3: float, z3: float,
+        name: str | None = None,
+        doc: str | None = None,
+    ) -> dict:
+        """Keyfi 3 nokta (mm, es-dogrusal olmamali) uzerinden gecen, HERHANGI BIR
+        yonelimde (eksene hizali olmak zorunda degil) yeni bir work plane olusturur.
+
+        inventor_create_work_plane sadece XY/XZ/YZ'ye PARALEL (ofsetli) duzlemler
+        olusturabilir; bu arac ise WorkPlanes.AddByThreePoints API'sini kullanarak
+        gercekten keyfi yonelimli bir duzlem kurar (orn. orijin + kure uzerindeki
+        iki nokta ile o iki noktanin buyuk-cember duzlemi). Her nokta icin arka
+        planda bir WorkPoint olusturulur (bu 3 WorkPoint dokumanin feature
+        agacinda gorunur kalir).
+        """
+        app = get_app()
+        document = get_document(app, doc)
+        comp_def = get_part_component_def(document)
+
+        wp1 = comp_def.WorkPoints.AddFixed(point3d(app, x1, y1, z1))
+        wp2 = comp_def.WorkPoints.AddFixed(point3d(app, x2, y2, z2))
+        wp3 = comp_def.WorkPoints.AddFixed(point3d(app, x3, y3, z3))
+        new_plane = comp_def.WorkPlanes.AddByThreePoints(wp1, wp2, wp3)
+        if name:
+            new_plane.Name = name
+        entity_id = registry.register(document.DisplayName, "_workfeatures", "plane", new_plane)
+        return {
+            "entity_id": entity_id,
+            "name": new_plane.Name,
+            "points_mm": [[x1, y1, z1], [x2, y2, z2], [x3, y3, z3]],
+        }
+
+    @mcp.tool()
+    @inventor_tool
+    async def inventor_create_work_plane_normal_to_curve(
+        curve_ref: str,
+        x_mm: float, y_mm: float, z_mm: float,
+        name: str | None = None,
+        doc: str | None = None,
+    ) -> dict:
+        """Bir egriye (curve_ref: entity_id - orn. bir Sketch3D cizgisi/spline'i
+        veya govde kenari), verilen nokta (mm) uzerinde DIK olan bir work plane
+        olusturur (WorkPlanes.AddByNormalToCurve).
+
+        Ozellikle Sweep feature'i icin, path'in baslangic noktasinda path'e tam
+        dik bir profil duzlemi kurmak icin kullanilir - boylece sweep profili
+        (orn. cubugun dairesel kesiti) yolun yonune tam dogru hizalanir.
+        curve_ref icin inventor_sketch3d_add_line/_add_spline'in dondurdugu
+        entity_id kullanilabilir.
+        """
+        app = get_app()
+        document = get_document(app, doc)
+        comp_def = get_part_component_def(document)
+
+        curve = registry.resolve(curve_ref)
+        point_on_curve = comp_def.WorkPoints.AddFixed(point3d(app, x_mm, y_mm, z_mm))
+        new_plane = comp_def.WorkPlanes.AddByNormalToCurve(curve, point_on_curve)
+        if name:
+            new_plane.Name = name
+        entity_id = registry.register(document.DisplayName, "_workfeatures", "plane", new_plane)
+        return {"entity_id": entity_id, "name": new_plane.Name, "point_mm": [x_mm, y_mm, z_mm]}
 
     @mcp.tool()
     @inventor_tool

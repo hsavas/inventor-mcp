@@ -1,7 +1,10 @@
 """Ortak yardimcilar: dokuman/sketch/feature lookup, hata sarmalama, transient geometry."""
 
 import functools
+import json
+import os
 import threading
+import time
 
 import pywintypes
 from win32com.client import CastTo, constants
@@ -43,18 +46,58 @@ def format_com_error(e: pywintypes.com_error) -> str:
     return f"Inventor COM hatasi 0x{hresult & 0xFFFFFFFF:08X}: {msg}{detail}"
 
 
+_TRACE_PATH = os.environ.get("INVENTOR_MCP_TRACE")  # JSONL dosya yolu; bossa kayit yok
+
+
+def _trace(tool: str, kwargs: dict, ok: bool, payload, started: float) -> None:
+    """Her tool cagrisini (egitim verisi / hata analizi icin) JSONL'e yazar."""
+    if not _TRACE_PATH:
+        return
+    try:
+        text = json.dumps(payload, ensure_ascii=False, default=str)
+        rec = {
+            "ts": time.time(),
+            "session": os.environ.get("INVENTOR_MCP_SESSION", ""),
+            "tool": tool,
+            # Buyuk argumanlar (orn. inventor_run_script betikleri) logu sisirmesin.
+            "args": {
+                k: (v[:2000] + f"...<{len(v)} karakter>" if isinstance(v, str) and len(v) > 2000 else v)
+                for k, v in kwargs.items()
+            },
+            "ok": ok,
+            "result": text[:4000],
+            "ms": round((time.time() - started) * 1000, 1),
+        }
+        with open(_TRACE_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+    except Exception:
+        pass  # kayit hatasi asla tool'u bozmamali
+
+
 def inventor_tool(func):
-    """COM ve lookup hatalarini okunabilir RuntimeError'a ceviren decorator."""
+    """COM ve lookup hatalarini okunabilir RuntimeError'a ceviren decorator.
+
+    INVENTOR_MCP_TRACE ortam degiskeni tanimliysa her cagri JSONL olarak kaydedilir.
+    """
 
     @functools.wraps(func)
     async def wrapper(*args, **kwargs):
+        started = time.time()
         with _com_lock:
             try:
-                return await func(*args, **kwargs)
+                result = await func(*args, **kwargs)
             except pywintypes.com_error as e:
-                raise RuntimeError(format_com_error(e)) from None
-            except LookupError as e:
+                msg = format_com_error(e)
+                _trace(func.__name__, kwargs, False, msg, started)
+                raise RuntimeError(msg) from None
+            except (LookupError, ValueError) as e:
+                _trace(func.__name__, kwargs, False, str(e), started)
                 raise RuntimeError(str(e)) from None
+            except Exception as e:
+                _trace(func.__name__, kwargs, False, f"{type(e).__name__}: {e}", started)
+                raise
+            _trace(func.__name__, kwargs, True, result, started)
+            return result
 
     return wrapper
 
@@ -131,6 +174,36 @@ def get_sketch(doc, name: str):
         if sk.Name == name:
             return sk
     raise LookupError(f"'{name}' adli sketch bulunamadi.")
+
+
+def count_closed_regions(sk) -> int:
+    """Sketch'teki kapali bolge (profil yolu) sayisini dondurur.
+
+    Profiles.Count sadece daha once olusturulmus Profile nesnelerini sayar
+    (yeni sketch'te hep 0). Bu yuzden gecici bir solid profili olusturup yol
+    sayisina bakiyor, sonra o gecici profili siliyoruz ki her cagri sketch'te
+    artik bir Profile nesnesi birakmasin.
+    """
+    try:
+        probe = sk.Profiles.AddForSolid()
+    except pywintypes.com_error:
+        return 0
+    try:
+        return probe.Count
+    finally:
+        try:
+            probe.Delete()
+        except (pywintypes.com_error, AttributeError):
+            pass
+
+
+def get_sketch3d(doc, name: str):
+    """Part dokumanindaki bir Sketch3D'yi adina gore bulur."""
+    comp_def = get_part_component_def(doc)
+    for sk in comp_def.Sketches3D:
+        if sk.Name == name:
+            return sk
+    raise LookupError(f"'{name}' adli 3D sketch bulunamadi.")
 
 
 def get_feature(doc, name: str):

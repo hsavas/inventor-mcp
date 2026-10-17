@@ -8,7 +8,14 @@ from win32com.client import CastTo, constants
 
 from inventor import registry
 from inventor.connection import get_app
-from inventor.helpers import get_document, get_part_component_def, get_sketch, inventor_tool, point2d
+from inventor.helpers import (
+    count_closed_regions,
+    get_document,
+    get_part_component_def,
+    get_sketch,
+    inventor_tool,
+    point2d,
+)
 from inventor.units import cm_to_mm, deg_to_rad, mm_to_cm, rad_to_deg
 
 PLANE_NAMES = {"XY": "XY Plane", "XZ": "XZ Plane", "YZ": "YZ Plane"}
@@ -430,12 +437,10 @@ def register(mcp):
             theta = math.radians(angle_deg) + i * 2 * math.pi / sides
             verts.append((cx + r * math.cos(theta), cy + r * math.sin(theta)))
 
-        lines = []
-        for i in range(sides):
-            ax, ay = verts[i]
-            bx, by = verts[(i + 1) % sides]
-            line = sk.SketchLines.AddByTwoPoints(point2d(app, ax, ay), point2d(app, bx, by))
-            lines.append(line)
+        # Bagimsiz AddByTwoPoints cizgileri uc noktalarini paylasmaz ve kapali
+        # profil olusturmaz (finish_sketch -> closed_regions: 0). Polyline ile
+        # ayni zincirleme yontemi kullaniliyor.
+        lines = _add_closed_polyline(app, sk, verts)
         entity_ids = [registry.register(document.DisplayName, sk.Name, "line", line) for line in lines]
         return {"entity_ids": entity_ids, "center": [cx, cy], "sides": sides, "vertex_radius": r}
 
@@ -781,7 +786,9 @@ def register(mcp):
     @mcp.tool()
     @inventor_tool
     async def inventor_finish_sketch(sketch: str, doc: str | None = None) -> dict:
-        """Sketch duzenlemeyi sonlandirir ve sketch'teki kapali profil sayisini dondurur."""
+        """Sketch duzenlemeyi sonlandirir ve sketch'teki kapali bolge (profil yolu)
+        sayisini dondurur. closed_regions=0 ise sketch extrude/revolve edilemez:
+        profil kapali degil (acik uc, cakisan/kopuk cizgi) demektir."""
         app = get_app()
         document = get_document(app, doc)
         sk = get_sketch(document, sketch)
@@ -789,4 +796,8 @@ def register(mcp):
             sk.ExitEdit()
         except (pywintypes.com_error, AttributeError):
             pass
-        return {"sketch": sk.Name, "profile_count": sk.Profiles.Count}
+        closed = count_closed_regions(sk)
+        result = {"sketch": sk.Name, "closed_regions": closed, "profile_count": closed}
+        if closed == 0:
+            result["warning"] = "Kapali profil yok: extrude/revolve basarisiz olur. Cizgi uclarini kontrol edin."
+        return result
