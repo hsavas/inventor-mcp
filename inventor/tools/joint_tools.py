@@ -5,8 +5,10 @@ serbestlik derecelerini tek seferde tanimlar. Inventor, entity_one'in ait oldugu
 occurrence'i entity_two'ya tasir (UI'daki "ilk secim ikinciye tasinir" davranisi).
 """
 
+import math
+
 import pywintypes
-from win32com.client import constants
+from win32com.client import CastTo, constants
 
 from inventor.connection import get_app
 from inventor.helpers import get_assembly_component_def, get_document, inventor_tool
@@ -134,6 +136,188 @@ def _get_joint(comp_def, name: str):
         raise LookupError(f"'{name}' adli joint bulunamadi.")
 
 
+def _validate_joint_args(kind: str, angle_limits_deg, linear_limits_mm) -> None:
+    if kind not in JOINT_TYPES:
+        raise LookupError(f"Gecersiz joint_type: '{kind}'. Gecerli degerler: {', '.join(JOINT_TYPES)}.")
+    if angle_limits_deg is not None:
+        if kind not in _ANGULAR_TYPES:
+            raise LookupError(f"'{kind}' joint turu aci limitlerini desteklemiyor (rotational, cylindrical).")
+        if len(angle_limits_deg) != 2:
+            raise LookupError("angle_limits_deg [baslangic, bitis] seklinde 2 elemanli olmali.")
+    if linear_limits_mm is not None:
+        if kind not in _LINEAR_TYPES:
+            raise LookupError(f"'{kind}' joint turu dogrusal limitleri desteklemiyor (slider, cylindrical).")
+        if len(linear_limits_mm) != 2:
+            raise LookupError("linear_limits_mm [baslangic, bitis] seklinde 2 elemanli olmali.")
+
+
+def _create_joint(
+    comp_def, kind, ent1, ent2, point_one, point_two, flip_alignment, flip_origin,
+    angle_limits_deg=None, linear_limits_mm=None, angle_position_deg=None,
+):
+    """Joint tanimini olusturup ekler (document.Update cagirmaz)."""
+    intent1 = comp_def.CreateGeometryIntent(ent1, _point_intent(ent1, point_one))
+    intent2 = comp_def.CreateGeometryIntent(ent2, _point_intent(ent2, point_two))
+    joints = comp_def.Joints
+    jd = joints.CreateAssemblyJointDefinition(JOINT_TYPES[kind], intent1, intent2)
+    if flip_alignment:
+        jd.FlipAlignmentDirection = True
+    if flip_origin:
+        jd.FlipOriginDirection = True
+
+    # Yeni tanimda pozisyon/limit degerleri dahili birimlerde (rad, cm) sayi olarak atanir.
+    if angle_position_deg is not None:
+        jd.AngularPosition = deg_to_rad(angle_position_deg)
+    if angle_limits_deg is not None:
+        jd.HasAngularPositionLimits = True
+        jd.AngularPositionStartLimit = deg_to_rad(angle_limits_deg[0])
+        jd.AngularPositionEndLimit = deg_to_rad(angle_limits_deg[1])
+    if linear_limits_mm is not None:
+        start, end = linear_limits_mm
+        if start is not None:
+            jd.HasLinearPositionStartLimit = True
+            jd.LinearPositionStartLimit = mm_to_cm(start)
+        if end is not None:
+            jd.HasLinearPositionEndLimit = True
+            jd.LinearPositionEndLimit = mm_to_cm(end)
+    return joints.Add(jd)
+
+
+# preserve_position toleranslari: konum 0.001 mm, rotasyon matris hucresi basina 1e-6.
+_POS_TOL_MM = 0.001
+_ROT_TOL = 1e-6
+_FLIP_COMBOS = ((False, False), (True, False), (False, True), (True, True))
+
+
+def _containing_occurrence(entity):
+    """Montaj uzayindaki bir kenar/yuz proxy'sinin ait oldugu occurrence'i dondurur."""
+    if entity.Type == constants.kEdgeProxyObject:
+        return CastTo(entity, "EdgeProxy").ContainingOccurrence
+    if entity.Type == constants.kFaceProxyObject:
+        return CastTo(entity, "FaceProxy").ContainingOccurrence
+    return None
+
+
+def _snapshot(occurrences) -> list:
+    return [(occ, occ.Transformation) for occ in occurrences if occ is not None]
+
+
+def _residual(snapshot) -> tuple[float, float, bool]:
+    """Snapshot'tan bu yana en cok kayan occurrence icin (konum mm, aci derece, tolerans icinde mi)."""
+    pos_mm, rot_deg, ok = 0.0, 0.0, True
+    for occ, before in snapshot:
+        after = occ.Transformation
+        tb, ta = before.Translation, after.Translation
+        dist_mm = cm_to_mm(math.dist((tb.X, tb.Y, tb.Z), (ta.X, ta.Y, ta.Z)))
+        diffs = [before.Cell(r, c) - after.Cell(r, c) for r in range(1, 4) for c in range(1, 4)]
+        # ||R1 - R2||_F = 2*sqrt(2)*sin(theta/2)
+        fro = math.sqrt(sum(d * d for d in diffs))
+        angle = math.degrees(2 * math.asin(min(1.0, fro / (2 * math.sqrt(2)))))
+        pos_mm, rot_deg = max(pos_mm, dist_mm), max(rot_deg, angle)
+        ok = ok and dist_mm <= _POS_TOL_MM and max(abs(d) for d in diffs) <= _ROT_TOL
+    return pos_mm, rot_deg, ok
+
+
+def _restore(snapshot) -> None:
+    for occ, before in snapshot:
+        occ.Transformation = before
+
+
+def _add_joint(
+    document, comp_def, kind, ent1, ent2, point_one="center", point_two="center",
+    flip_alignment=False, flip_origin=False, angle_limits_deg=None, linear_limits_mm=None,
+    name=None, preserve_position=True,
+):
+    """Joint ekler; preserve_position ise occurrence'larin konumunu korumaya calisir.
+
+    (joint, preserve_bilgisi | None) dondurur. Rigid joint parcayi kaydirirsa diger
+    flip kombinasyonlari denenir; hicbiri tutmazsa (orn. dairesel kenarlarda duzlem ici
+    aci farki) - rigid tanimda aci secenegi olmadigi icin (AngularPosition E_FAIL,
+    AlignmentOne/Two aci degil geometri referansi) - ayni orijinlerde rotational joint
+    olusturulur, eski konumu veren aciya surulur ve [a, a] limitleriyle kilitlenir.
+    """
+    if not preserve_position:
+        j = _create_joint(comp_def, kind, ent1, ent2, point_one, point_two, flip_alignment, flip_origin,
+                          angle_limits_deg, linear_limits_mm)
+        if name:
+            j.Name = name
+        document.Update()
+        return j, None
+
+    snap = _snapshot([_containing_occurrence(ent1), _containing_occurrence(ent2)])
+    attempts = 0
+
+    def attempt(k, fa, fo, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        j = _create_joint(comp_def, k, ent1, ent2, point_one, point_two, fa, fo, **kwargs)
+        document.Update()
+        return j, _residual(snap)
+
+    def finish(j, final_type, fa, fo, res, fallback=None, locked_angle=None):
+        info = {
+            "preserved": res[2],
+            "requested_type": kind,
+            "final_type": final_type,
+            "flip_alignment": fa,
+            "flip_origin": fo,
+            "fallback": fallback,
+            "attempts": attempts,
+            "residual_mm": res[0],
+            "residual_deg": res[1],
+        }
+        if locked_angle is not None:
+            info["locked_angle_deg"] = locked_angle
+        return j, info
+
+    j, res = attempt(kind, flip_alignment, flip_origin,
+                     angle_limits_deg=angle_limits_deg, linear_limits_mm=linear_limits_mm)
+    if res[2] or kind != "rigid":
+        if name:
+            j.Name = name
+        return finish(j, kind, flip_alignment, flip_origin, res)
+
+    best = (res[0], res[1], flip_alignment, flip_origin)
+    j.Delete()
+    _restore(snap)
+    for fa, fo in _FLIP_COMBOS:
+        if (fa, fo) == (flip_alignment, flip_origin):
+            continue
+        j, res = attempt("rigid", fa, fo)
+        if res[2]:
+            if name:
+                j.Name = name
+            return finish(j, "rigid", fa, fo, res)
+        best = min(best, (res[0], res[1], fa, fo))
+        j.Delete()
+        _restore(snap)
+
+    _, _, bfa, bfo = best
+    if best[0] <= _POS_TOL_MM:
+        # Sadece eksen etrafinda aci farki kaldi: rotational joint'i dogru aciya sur.
+        j, res = attempt("rotational", bfa, bfo)
+        found = None
+        if res[0] <= _POS_TOL_MM:
+            for a in (res[1], -res[1]):
+                j.Definition.AngularPosition.Value = deg_to_rad(a)
+                document.Update()
+                if _residual(snap)[2]:
+                    found = a
+                    break
+        j.Delete()
+        _restore(snap)
+        if found is not None:
+            j, res = attempt("rotational", bfa, bfo, angle_limits_deg=[found, found], angle_position_deg=found)
+            j.Name = f"{name or j.Name}_locked"
+            return finish(j, "rotational", bfa, bfo, res, fallback="rotational_locked", locked_angle=found)
+
+    # Konum korunamadi: en az kaydiran rigid kombinasyonu birak ve kalan hatayi raporla.
+    j, res = attempt("rigid", bfa, bfo)
+    if name:
+        j.Name = name
+    return finish(j, "rigid", bfa, bfo, res)
+
+
 def register(mcp):
     @mcp.tool()
     @inventor_tool
@@ -147,6 +331,7 @@ def register(mcp):
         flip_origin: bool = False,
         angle_limits_deg: list[float] | None = None,
         linear_limits_mm: list[float | None] | None = None,
+        preserve_position: bool = True,
         name: str | None = None,
         doc: str | None = None,
     ) -> dict:
@@ -165,6 +350,16 @@ def register(mcp):
         angle_limits_deg: [baslangic, bitis] aci limitleri (derece) - rotational, cylindrical.
         linear_limits_mm: [baslangic, bitis] dogrusal limitler (mm) - slider, cylindrical;
         tek tarafli limit icin digerini null verin.
+        preserve_position: True ise (varsayilan) occurrence'larin mevcut konumu korunmaya
+        calisilir. Rigid joint parcayi kaydirirsa diger flip_alignment/flip_origin
+        kombinasyonlari denenir; hicbiri tutmazsa (orn. dairesel kenarlarda duzlem ici aci
+        farki) ayni orijinlerde rotational joint olusturulup eski aciya kilitlenir
+        (limitler [a, a], adi '<ad>_locked'). Konum hic korunamiyorsa en az kaydiran
+        flip kombinasyonu kalir - bu, istenen flip_* degerlerini degistirebilir; flip'leri
+        aynen uygulamak icin preserve_position=False verin. Diger turlerde sadece kayma
+        raporlanir.
+        Sonuctaki 'preserve_position' alani: final_type, kullanilan flip'ler, fallback,
+        kalan hata (residual_mm / residual_deg).
         name: opsiyonel joint adi (verilmezse Inventor 'Rotational:1' gibi ad verir).
         """
         app = get_app()
@@ -172,51 +367,17 @@ def register(mcp):
         comp_def = get_assembly_component_def(document)
 
         kind = joint_type.lower()
-        if kind not in JOINT_TYPES:
-            raise LookupError(
-                f"Gecersiz joint_type: '{joint_type}'. Gecerli degerler: {', '.join(JOINT_TYPES)}."
-            )
-        if angle_limits_deg is not None:
-            if kind not in _ANGULAR_TYPES:
-                raise LookupError(f"'{kind}' joint turu aci limitlerini desteklemiyor (rotational, cylindrical).")
-            if len(angle_limits_deg) != 2:
-                raise LookupError("angle_limits_deg [baslangic, bitis] seklinde 2 elemanli olmali.")
-        if linear_limits_mm is not None:
-            if kind not in _LINEAR_TYPES:
-                raise LookupError(f"'{kind}' joint turu dogrusal limitleri desteklemiyor (slider, cylindrical).")
-            if len(linear_limits_mm) != 2:
-                raise LookupError("linear_limits_mm [baslangic, bitis] seklinde 2 elemanli olmali.")
+        _validate_joint_args(kind, angle_limits_deg, linear_limits_mm)
         ent1 = resolve_entity(document, comp_def, entity_one)
         ent2 = resolve_entity(document, comp_def, entity_two)
-        intent1 = comp_def.CreateGeometryIntent(ent1, _point_intent(ent1, point_one))
-        intent2 = comp_def.CreateGeometryIntent(ent2, _point_intent(ent2, point_two))
-
-        joints = comp_def.Joints
-        jd = joints.CreateAssemblyJointDefinition(JOINT_TYPES[kind], intent1, intent2)
-        if flip_alignment:
-            jd.FlipAlignmentDirection = True
-        if flip_origin:
-            jd.FlipOriginDirection = True
-
-        # Yeni tanimda pozisyon/limit degerleri dahili birimlerde (rad, cm) sayi olarak atanir.
-        if angle_limits_deg is not None:
-            jd.HasAngularPositionLimits = True
-            jd.AngularPositionStartLimit = deg_to_rad(angle_limits_deg[0])
-            jd.AngularPositionEndLimit = deg_to_rad(angle_limits_deg[1])
-        if linear_limits_mm is not None:
-            start, end = linear_limits_mm
-            if start is not None:
-                jd.HasLinearPositionStartLimit = True
-                jd.LinearPositionStartLimit = mm_to_cm(start)
-            if end is not None:
-                jd.HasLinearPositionEndLimit = True
-                jd.LinearPositionEndLimit = mm_to_cm(end)
-
-        j = joints.Add(jd)
-        if name:
-            j.Name = name
-        document.Update()
-        return _joint_summary(j)
+        j, info = _add_joint(
+            document, comp_def, kind, ent1, ent2, point_one, point_two, flip_alignment, flip_origin,
+            angle_limits_deg, linear_limits_mm, name, preserve_position,
+        )
+        entry = _joint_summary(j)
+        if info is not None:
+            entry["preserve_position"] = info
+        return entry
 
     @mcp.tool()
     @inventor_tool
