@@ -120,7 +120,7 @@ Occurrences whose names match `name_filter` (regex, default `screw|pin|washer`) 
 
 ## Credits
 
-- **[Andrzej Kalinowski](https://github.com/AndrzejKalinowski)** — assembly joint tools (`joint_tools.py`), robust face/edge listing for threaded and imported parts, and re-resolving occurrence entity IDs after a server restart ([PR #2](https://github.com/hsavas/inventor-mcp/pull/2)).
+- **[Andrzej Kalinowski](https://github.com/AndrzejKalinowski)** — assembly joint tools (`joint_tools.py`) with position-preserving joints and fastener auto-jointing, `inventor_assembly_get_occurrence`, robust face/edge listing for threaded and imported parts, re-resolving occurrence entity IDs after a server restart, and registry-based type library lookup ([PR #2](https://github.com/hsavas/inventor-mcp/pull/2)).
 
 See [CHANGELOG.md](CHANGELOG.md) for the history of changes.
 

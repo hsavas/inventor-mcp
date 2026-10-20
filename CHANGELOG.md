@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-10-20
+
+### Added
+- `inventor_assembly_get_occurrence` — one occurrence's position, full rotation
+  matrix, and grounded/suppressed/visible state. *(Andrzej Kalinowski)*
+- `preserve_position` option for `inventor_assembly_add_joint` (default on): keeps
+  already-placed parts where they are by trying other flip combinations, or a
+  rotational joint locked at the restoring angle. *(Andrzej Kalinowski)*
+- `inventor_assembly_auto_joint_fasteners` — matches screws/pins/washers to their
+  seats by coaxial circular edges and joins them with rigid joints; dry run by
+  default. *(Andrzej Kalinowski)*
+
+### Changed
+- The Inventor type library version is read from the registry instead of being
+  hard-coded (approach from Andrzej Kalinowski's PR #2).
+
 ## 2026-10-17
 
 ### Fixed

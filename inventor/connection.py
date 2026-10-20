@@ -23,6 +23,7 @@ YENI DAVRANIS
 """
 
 import threading
+import winreg
 
 import pythoncom
 import pywintypes
@@ -51,10 +52,24 @@ def _co_init() -> None:
         pass  # zaten bu thread'de initialize edilmis (S_FALSE)
 
 
+def _typelib_version() -> tuple[int, int]:
+    """Kayitli en yuksek tip kutuphanesi surumunu HKCR\\TypeLib\\{GUID} altindan okur.
+
+    (Andrzej Kalinowski'nin PR #2'deki yaklasimi.) Okunamazsa varsayilan 1.0 kullanilir.
+    """
+    try:
+        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, "TypeLib\\" + TYPELIB_GUID) as key:
+            versions = [winreg.EnumKey(key, i) for i in range(winreg.QueryInfoKey(key)[0])]
+        return max(tuple(int(p, 16) for p in v.split(".")) for v in versions)
+    except (OSError, ValueError):
+        return TYPELIB_MAJOR, TYPELIB_MINOR
+
+
 def _ensure_typelib() -> None:
     """Inventor'u BASLATMADAN gen_py modulunu yukler -> constants dolar."""
+    major, minor = _typelib_version()
     try:
-        win32com.client.gencache.EnsureModule(TYPELIB_GUID, TYPELIB_LCID, TYPELIB_MAJOR, TYPELIB_MINOR)
+        win32com.client.gencache.EnsureModule(TYPELIB_GUID, TYPELIB_LCID, major, minor)
     except Exception:
         # Tip kutuphanesi bulunamazsa constants ilk baglantida (EnsureDispatch) dolar.
         pass
