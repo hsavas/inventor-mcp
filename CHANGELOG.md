@@ -11,6 +11,28 @@
 - `inventor_assembly_auto_joint_fasteners` — matches screws/pins/washers to their
   seats by coaxial circular edges and joins them with rigid joints; dry run by
   default. *(Andrzej Kalinowski)*
+- `units` argument for `inventor_new_document` (default `"metric"`): uses the
+  metric template and forces mm/gram/degree. *(Sam-H101)*
+- `affected_bodies` argument for `inventor_extrude` and `inventor_revolve`, so
+  join/cut/intersect can target specific bodies in multi-body parts. *(Sam-H101)*
+- `units` argument for `inventor_create_parameter`. *(Sam-H101)*
+- Automated tests tracked in the repo: `tests/functional_test.py` (end-to-end, 32
+  checks) and `tests/check_single_instance.py`; see "Testing" in the README.
+- `preserve_position` result reports `flips_changed` when the requested flips
+  were changed to keep parts in place.
+
+### Fixed
+- User parameters are created in the document's units ("46 mm" no longer shows
+  as cm); parameter `value` is reported in the parameter's own units, with the
+  raw database value in `value_db`. *(Sam-H101)*
+- `inventor_list_bodies` works on Inventor versions without
+  `SurfaceBody.MassProperties` (before 2023), using `Volume(0.0001)` and face
+  areas as a fallback. *(Sam-H101; fallback precision corrected)*
+- `kFinishParameter` and joint health constants are looked up safely, so a
+  missing constant in an older type library no longer stops the server from
+  starting.
+- A failed position-preserving joint attempt no longer leaves a temporary
+  joint behind in the assembly.
 
 ### Changed
 - The Inventor type library version is read from the registry instead of being

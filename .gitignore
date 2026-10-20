@@ -10,7 +10,10 @@ __pycache__/
 *.dwg
 OldVersions/
 models/
-tests/
+# tests/: only the automated test scripts are tracked (manual scratch tests stay local)
+tests/*
+!tests/functional_test.py
+!tests/check_single_instance.py
 
 # Build artifacts / screenshots / scratch
 *.mcpb

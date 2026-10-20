@@ -33,21 +33,29 @@ JOINT_TYPE_NAMES = {v: k for k, v in JOINT_TYPES.items()}
 _ANGULAR_TYPES = ("rotational", "cylindrical")
 _LINEAR_TYPES = ("slider", "cylindrical")
 
+# HealthStatusEnum adlari. Bazi degerler (orn. kInvalidLimitsHealth,
+# kJointDOFLockedHealth) eski Inventor tip kutuphanelerinde olmayabilir; burada
+# getattr ile okunur ki eksik bir sabit sunucunun acilisini bozmasin.
+_HEALTH_CONSTANTS = {
+    "kUpToDateHealth": "up_to_date",
+    "kOutOfDateHealth": "out_of_date",
+    "kDriverLostHealth": "driver_lost",
+    "kInErrorHealth": "in_error",
+    "kDeletedHealth": "deleted",
+    "kCannotComputeHealth": "cannot_compute",
+    "kSuppressedHealth": "suppressed",
+    "kBeyondStopNodeHealth": "beyond_stop_node",
+    "kInconsistentHealth": "inconsistent",
+    "kRedundantHealth": "redundant",
+    "kNewlyAddedHealth": "newly_added",
+    "kInvalidLimitsHealth": "invalid_limits",
+    "kJointDOFLockedHealth": "dof_locked",
+    "kUnknownHealth": "unknown",
+}
 HEALTH_NAMES = {
-    constants.kUpToDateHealth: "up_to_date",
-    constants.kOutOfDateHealth: "out_of_date",
-    constants.kDriverLostHealth: "driver_lost",
-    constants.kInErrorHealth: "in_error",
-    constants.kDeletedHealth: "deleted",
-    constants.kCannotComputeHealth: "cannot_compute",
-    constants.kSuppressedHealth: "suppressed",
-    constants.kBeyondStopNodeHealth: "beyond_stop_node",
-    constants.kInconsistentHealth: "inconsistent",
-    constants.kRedundantHealth: "redundant",
-    constants.kNewlyAddedHealth: "newly_added",
-    constants.kInvalidLimitsHealth: "invalid_limits",
-    constants.kJointDOFLockedHealth: "dof_locked",
-    constants.kUnknownHealth: "unknown",
+    getattr(constants, const): label
+    for const, label in _HEALTH_CONSTANTS.items()
+    if hasattr(constants, const)
 }
 
 # Kenarlar icin PointIntentEnum.
@@ -266,6 +274,8 @@ def _add_joint(
             "final_type": final_type,
             "flip_alignment": fa,
             "flip_origin": fo,
+            # True ise istenen flip_alignment/flip_origin konumu korumak icin degistirildi.
+            "flips_changed": (fa, fo) != (flip_alignment, flip_origin),
             "fallback": fallback,
             "attempts": attempts,
             "residual_mm": res[0],
@@ -302,15 +312,19 @@ def _add_joint(
         # Sadece eksen etrafinda aci farki kaldi: rotational joint'i dogru aciya sur.
         j, res = attempt("rotational", bfa, bfo)
         found = None
-        if res[0] <= _POS_TOL_MM:
-            for a in (res[1], -res[1]):
-                j.Definition.AngularPosition.Value = deg_to_rad(a)
-                document.Update()
-                if _residual(snap)[2]:
-                    found = a
-                    break
-        j.Delete()
-        _restore(snap)
+        try:
+            if res[0] <= _POS_TOL_MM:
+                for a in (res[1], -res[1]):
+                    j.Definition.AngularPosition.Value = deg_to_rad(a)
+                    document.Update()
+                    if _residual(snap)[2]:
+                        found = a
+                        break
+        finally:
+            # Gecici rotational joint'i her durumda kaldir ve parcalari geri koy,
+            # ki bir COM hatasi montajda yarim kalmis bir joint birakmasin.
+            j.Delete()
+            _restore(snap)
         if found is not None:
             j, res = attempt("rotational", bfa, bfo, angle_limits_deg=[found, found], angle_position_deg=found)
             j.Name = f"{name or j.Name}_locked"

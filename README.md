@@ -110,6 +110,17 @@ inventor_assembly_auto_joint_fasteners(skip=["pin:3"], dry_run=False)
 
 Occurrences whose names match `name_filter` (regex, default `screw|pin|washer`) are matched to a coaxial, coplanar circular edge on another occurrence. A head-underside-on-seat contact is preferred. Fasteners that already have joints or constraints are skipped, and duplicates (same file, identical position) are reported.
 
+## Testing
+
+Run both tests against a real Inventor before every push (or before opening a pull request):
+
+```powershell
+.venv\Scripts\python.exe tests\functional_test.py        # end-to-end tool test, prints PASS/FAIL per check
+.venv\Scripts\python.exe tests\check_single_instance.py  # 2 processes x 2 threads must share ONE Inventor
+```
+
+`functional_test.py` builds parts and an assembly in a temporary folder (`%TEMP%\inv_mcp_test`) through the MCP tools: sketches and closed profiles, extrude/revolve/sweep, 3D sketches, threads, sheet metal, parameters and units, multi-body `affected_bodies`, `list_bodies` volumes, and all joint tools including `preserve_position` and fastener auto-jointing. It closes its documents without saving, quits Inventor if it started it, and exits with code 0 only if every check passes.
+
 ## Architecture notes
 
 - `inventor/connection.py` manages the connection to `Inventor.Application`, re-initializing COM per call to stay safe across the multi-threaded calls an MCP server can receive. Inventor's COM server is *single-use*: every `CreateObject`/`Dispatch("Inventor.Application")` starts a **new** Inventor process. The connection layer therefore always attaches through the Running Object Table first (`GetActiveObject`) and creates an instance only when none exists, under a named mutex. At import time it only loads the type library so `win32com.client.constants` is populated, without starting Inventor.
@@ -121,6 +132,8 @@ Occurrences whose names match `name_filter` (regex, default `screw|pin|washer`) 
 ## Credits
 
 - **[Andrzej Kalinowski](https://github.com/AndrzejKalinowski)** — assembly joint tools (`joint_tools.py`) with position-preserving joints and fastener auto-jointing, `inventor_assembly_get_occurrence`, robust face/edge listing for threaded and imported parts, re-resolving occurrence entity IDs after a server restart, and registry-based type library lookup ([PR #2](https://github.com/hsavas/inventor-mcp/pull/2)).
+
+- **[Sam-H101](https://github.com/Sam-H101)** — Inventor 2020 compatibility and correctness fixes: parameters in the document's own units, `affected_bodies` for extrude/revolve in multi-body parts, metric document templates, and `list_bodies` without `SurfaceBody.MassProperties` ([PR #1](https://github.com/hsavas/inventor-mcp/pull/1)).
 
 See [CHANGELOG.md](CHANGELOG.md) for the history of changes.
 

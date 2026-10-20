@@ -8,9 +8,8 @@ from inventor.connection import get_app
 from inventor.helpers import get_document, get_part_component_def, inventor_tool
 from inventor.units import cm2_to_mm2, cm3_to_mm3, cm_to_mm
 
-# Inventor 2020'nin typelib'i AccuracyEnum sabitlerini disari vermiyor; sayisal
-# kHighAccuracy degerini kullan (varsa sabitten al).
-K_HIGH_ACCURACY = getattr(constants, "kHighAccuracy", 26114)
+# Inventor < 2023 icin hacim yedegi (bkz. _body_volume_cm3).
+VOLUME_PRECISION = 0.0001  # SurfaceBody.Volume(PrecisionPercent): goreli dogruluk, kesir (0.0001 = %0.01)
 
 SURFACE_TYPE_NAMES = {
     constants.kPlaneSurface: "plane",
@@ -112,25 +111,47 @@ def edge_summary(edge) -> dict:
     return entry
 
 
+def _body_mass_properties(body):
+    """SurfaceBody.MassProperties (Inventor 2023+); eski surumlerde None."""
+    try:
+        return body.MassProperties
+    except Exception:
+        return None
+
+
 def _body_volume_cm3(body):
     """Bir govdenin hacmini (cm^3) dondurur.
 
-    SurfaceBody'de 'MassProperties' YOKTUR (o ComponentDefinition uzerindedir);
-    hacim, bir dogruluk (accuracy) argumani alan parametreli 'Volume'
-    ozelliginden okunur.
+    Inventor 2023+ : SurfaceBody.MassProperties.Volume.
+    Daha eski surumler (orn. 2020): SurfaceBody.MassProperties yoktur; hacim
+    parametreli 'Volume(PrecisionPercent)' ozelliginden okunur. Arguman bir
+    ENUM DEGIL, kesir olarak goreli dogruluktur (0.01 = %1 hata), bu yuzden
+    burada 0.0001 (%0.01) kullanilir.
     """
+    mp = _body_mass_properties(body)
+    if mp is not None:
+        try:
+            return mp.Volume
+        except Exception:
+            pass
     try:
-        return body.Volume(K_HIGH_ACCURACY)
+        return body.Volume(VOLUME_PRECISION)
     except Exception:
         return None
 
 
 def _body_area_cm2(body):
-    """Bir govdenin yuzey alanini (cm^2) yuzlerin alanlarini toplayarak hesaplar.
+    """Bir govdenin yuzey alanini (cm^2) dondurur.
 
-    SurfaceBody'de 'SurfaceArea' ozelligi de bulunmadigi icin her yuzun
-    Evaluator.Area degeri toplanir.
+    Inventor 2023+ : SurfaceBody.MassProperties.Area; eski surumlerde her
+    yuzun Evaluator.Area degeri toplanir.
     """
+    mp = _body_mass_properties(body)
+    if mp is not None:
+        try:
+            return mp.Area
+        except Exception:
+            pass
     try:
         return sum(face.Evaluator.Area for face in body.Faces)
     except Exception:
