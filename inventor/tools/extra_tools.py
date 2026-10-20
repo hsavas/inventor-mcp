@@ -13,6 +13,7 @@ from inventor import registry
 from inventor.connection import get_app
 from inventor.helpers import (
     count_closed_regions,
+    ensure_healthy,
     get_document,
     get_part_component_def,
     get_sketch,
@@ -160,6 +161,7 @@ def register(mcp):
         faces = sm.Features.FaceFeatures
         fdef = faces.CreateFaceFeatureDefinition(profile)
         feat = faces.Add(fdef)
+        ensure_healthy(document, feat, "sheet_metal_face")
         return {"name": feat.Name, "type": "sheet_metal_face"}
 
     @mcp.tool()
@@ -178,6 +180,7 @@ def register(mcp):
         flanges = sm.Features.FlangeFeatures
         fdef = flanges.CreateFlangeDefinition(edges, f"{angle_deg} deg", f"{height_mm} mm")
         feat = flanges.Add(fdef)
+        ensure_healthy(document, feat, "flange")
         return {"name": feat.Name, "type": "flange", "height_mm": height_mm, "angle_deg": angle_deg}
 
     @mcp.tool()
@@ -239,4 +242,5 @@ def register(mcp):
             if depth_mm is None:
                 raise ValueError("full_length=False ise depth_mm verilmeli.")
             feat = threads.Add(face, start_edge, info, False, False, f"{depth_mm} mm")
+        ensure_healthy(document, feat, "thread")
         return {"name": feat.Name, "type": "thread", "designation": designation, "class": cls, "internal": internal}

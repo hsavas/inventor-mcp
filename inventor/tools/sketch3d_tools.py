@@ -13,12 +13,12 @@ Inventor geometrisi olarak insa edilebilir.
 
 from inventor import registry
 from inventor.connection import get_app
-from inventor.helpers import get_document, get_part_component_def, get_sketch3d, inventor_tool, point3d
+from inventor.helpers import get_document, get_part_component_def, get_sketch3d, inventor_tool, point3d, has_member
 from inventor.units import cm_to_mm
 
 
 def _point3d_summary(pt) -> list:
-    g = pt.Geometry if hasattr(pt, "Geometry") else pt
+    g = pt.Geometry if has_member(pt, "Geometry") else pt
     return [cm_to_mm(g.X), cm_to_mm(g.Y), cm_to_mm(g.Z)]
 
 

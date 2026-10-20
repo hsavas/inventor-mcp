@@ -34,7 +34,9 @@ def _find_library_asset(app, name: str, library: str | None = None):
         assets = lib.AppearanceAssets
         for j in range(1, assets.Count + 1):
             a = assets.Item(j)
-            if a.DisplayName.lower() == name_lower:
+            # inventor_list_appearances hem ic adi ('name', orn. 'ACADGen-209') hem
+            # gorunen adi ('display_name') dondurur; ikisi de kabul edilir.
+            if a.DisplayName.lower() == name_lower or a.Name.lower() == name_lower:
                 return a
             if fallback is None and name_lower in a.DisplayName.lower():
                 fallback = a
@@ -103,7 +105,8 @@ def register(mcp):
         """Bir govdeye veya yuze appearance (gorunum/renk) atar.
 
         target: 'body' (body_index ile) veya 'face' (entity_id ile, inventor_list_faces'tan).
-        appearance_name: asset kutuphanesindeki gorunum adi (orn. 'Black', 'Nickel', 'Red').
+        appearance_name: asset kutuphanesindeki gorunum adi (orn. 'Black', 'Nickel', 'Red');
+        inventor_list_appearances'in dondurdugu 'name' veya 'display_name' olabilir.
         Tam isim eslesmezse alt-dize eslesmesiyle en yakin gorunum kullanilir
         (`inventor_list_appearances` ile arama yapilabilir).
         library: arama yapilacak kutuphane adinda alt-dize (orn. 'Appearance').
@@ -130,7 +133,12 @@ def register(mcp):
 
         color_result = None
         if color_rgb is not None or opacity is not None:
-            local = source_asset.CopyTo(document)
+            # Renk ozellestirmesi icin YENI bir kopya gerekir (ayni gorunumu kullanan diger
+            # govdeler degismesin). Kutuphaneden ayni asset'i ikinci kez CopyTo ile almak
+            # isim cakismasi yuzunden hata verir; dokumandaki kopyanin Duplicate'i ise
+            # benzersiz adli ('Cored(1)' gibi) yeni bir asset olusturur.
+            base = _get_or_copy_local_asset(document, source_asset)
+            local = dynamic.Dispatch(base._oleobj_).Duplicate()
             color_result = _diffuse_color(app, local, color_rgb, opacity)
         else:
             local = _get_or_copy_local_asset(document, source_asset)

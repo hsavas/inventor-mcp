@@ -94,6 +94,12 @@ def register(mcp):
         except pywintypes.com_error:
             raise LookupError(f"'{name}' adli parametre bulunamadi.")
         param.Expression = expression
+        # Parametre degisikligi modeli kendiliginden yeniden hesaplamaz; Update olmadan
+        # govde eski olculerde kalir (hacim/sinir kutusu degismez).
+        try:
+            document.Update()
+        except pywintypes.com_error:
+            pass
         return _parameter_summary(param, document)
 
     @mcp.tool()

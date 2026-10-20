@@ -119,7 +119,7 @@ Run both tests against a real Inventor before every push (or before opening a pu
 .venv\Scripts\python.exe tests\check_single_instance.py  # 2 processes x 2 threads must share ONE Inventor
 ```
 
-`functional_test.py` builds parts and an assembly in a temporary folder (`%TEMP%\inv_mcp_test`) through the MCP tools: sketches and closed profiles, extrude/revolve/sweep, 3D sketches, threads, sheet metal, parameters and units, multi-body `affected_bodies`, `list_bodies` volumes, and all joint tools including `preserve_position` and fastener auto-jointing. It closes its documents without saving, quits Inventor if it started it, and exits with code 0 only if every check passes.
+`functional_test.py` calls **every one of the server's tools** (it fails if any tool is never called) in a temporary folder (`%TEMP%\inv_mcp_test`): all sketch tools (each closed shape must be exactly one closed region), every feature (with volumes checked against the expected values), work geometry, parameters and units, iProperties, appearances, all export formats, assemblies (constraints, joints, patterns, BOM) and drawings (views, dimensions, parts lists, sheets, PDF/DWG). It closes its documents without saving, quits Inventor if it started it, and exits with code 0 only if every check passes. A full run takes about 3 minutes; pass section names to run only some, e.g. `functional_test.py build_parts drawing_test`.
 
 ## Architecture notes
 

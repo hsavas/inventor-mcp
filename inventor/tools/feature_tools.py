@@ -8,6 +8,10 @@ from win32com.client import constants
 from inventor import registry
 from inventor.connection import get_app
 from inventor.helpers import (
+    has_member,
+    delete_feature_keep_sketches,
+    ensure_healthy,
+    feature_is_healthy,
     get_document,
     get_feature,
     get_part_component_def,
@@ -155,7 +159,7 @@ def _new_body_then_combine(app, comp_def, affected_bodies, op, make_feature):
 
 
 def _feature_summary(feature) -> dict:
-    return {"name": feature.Name, "type": feature.Type if hasattr(feature, "Type") else feature.__class__.__name__}
+    return {"name": feature.Name, "type": feature.Type if has_member(feature, "Type") else feature.__class__.__name__}
 
 
 def register(mcp):
@@ -196,6 +200,7 @@ def register(mcp):
         ext_def.SetDistanceExtent(mm_to_cm(distance_mm), dir_enum)
         _apply_affected_bodies(app, comp_def, ext_def, affected_bodies)
         feature = ext_features.Add(ext_def)
+        ensure_healthy(document, feature, "extrude")
         return {"name": feature.Name, "type": "extrude"}
 
     @mcp.tool()
@@ -241,6 +246,7 @@ def register(mcp):
             feature = _new_body_then_combine(app, comp_def, affected_bodies, op, _make)
         else:
             feature = _make(op)
+        ensure_healthy(document, feature, "revolve")
         return {"name": feature.Name, "type": "revolve"}
 
     @mcp.tool()
@@ -341,6 +347,7 @@ def register(mcp):
         except pywintypes.com_error as exc:
             raise RuntimeError(f"Coil feature olusturulamadi: {exc}")
 
+        ensure_healthy(document, feature, "coil")
         return {"name": feature.Name, "type": "coil"}
 
     def _resolve_path_curve(document, comp_def, path_ref: str):
@@ -412,6 +419,7 @@ def register(mcp):
                 feature = sweep_features.AddUsingPath(profile, path_obj, op)
         except pywintypes.com_error as exc:
             raise RuntimeError(f"Sweep feature olusturulamadi: {exc}")
+        ensure_healthy(document, feature, "sweep")
         return {"name": feature.Name, "type": "sweep"}
 
     @mcp.tool()
@@ -450,6 +458,7 @@ def register(mcp):
             feature = loft_features.Add(loft_def)
         except pywintypes.com_error as exc:
             raise RuntimeError(f"Loft feature olusturulamadi: {exc}")
+        ensure_healthy(document, feature, "loft")
         return {"name": feature.Name, "type": "loft", "sections": sections}
 
     @mcp.tool()
@@ -480,6 +489,7 @@ def register(mcp):
             feature = combine_features.Add(base_body, tool_bodies, op, keep_tool_bodies)
         except pywintypes.com_error as exc:
             raise RuntimeError(f"Combine feature olusturulamadi: {exc}")
+        ensure_healthy(document, feature, "combine")
         return {"name": feature.Name, "type": "combine", "operation": operation}
 
     @mcp.tool()
@@ -495,27 +505,66 @@ def register(mcp):
         counterbore_depth_mm: float | None = None,
         countersink_diameter_mm: float | None = None,
         countersink_angle_deg: float | None = None,
+        direction: str = "auto",
         doc: str | None = None,
     ) -> dict:
         """Sketch'teki nokta(lar)dan delik (hole) feature'i olusturur.
 
         hole_type: 'simple', 'counterbore', 'countersink'.
         depth_mm verilmezse ve through_all=False ise delik 1mm derinliginde acilir.
+        direction: 'auto' (varsayilan) malzemeye giren yonu kendisi bulur (sketch
+        parcanin altinda da ustunde de olabilir); 'negative' / 'positive' sketch
+        normaline gore yonu zorlar. Sonuctaki 'direction' kullanilan yonu gosterir.
         """
         app = get_app()
         document = get_document(app, doc)
         comp_def = get_part_component_def(document)
         sk = get_sketch(document, sketch)
 
-        points = _object_collection(app, [registry.resolve(eid) for eid in point_entity_ids])
-
+        point_objs = [registry.resolve(eid) for eid in point_entity_ids]
         hole_features = comp_def.Features.HoleFeatures
-        placement = hole_features.CreateSketchPlacementDefinition(points)
-
         diameter_cm = mm_to_cm(diameter_mm)
-        direction = constants.kNegativeExtentDirection
         kind = hole_type.lower()
+        if kind not in ("simple", "counterbore", "countersink"):
+            raise LookupError(f"Gecersiz hole_type: '{hole_type}'. Gecerli degerler: simple, counterbore, countersink.")
+        dir_key = direction.lower()
+        if dir_key not in ("auto", "negative", "positive"):
+            raise LookupError(f"Gecersiz direction: '{direction}'. Gecerli degerler: auto, negative, positive.")
 
+        # Delik yonu sketch normaline gore tanimlanir ve hangi yonun malzemeye girdigi
+        # sketch'in parcanin hangi tarafinda oldugune baglidir (orn. XY'de z=0 tabanda
+        # 'negative', z=ust yuzdeki bir duzlemde 'positive' calisir). 'auto' once
+        # negative'i dener; Inventor delik feature'ini hatali isaretlerse geri alip
+        # positive ile tekrar dener.
+        if dir_key == "auto":
+            candidates = [constants.kNegativeExtentDirection, constants.kPositiveExtentDirection]
+        elif dir_key == "negative":
+            candidates = [constants.kNegativeExtentDirection]
+        else:
+            candidates = [constants.kPositiveExtentDirection]
+
+        feature = None
+        for i, hole_dir in enumerate(candidates):
+            last = i == len(candidates) - 1
+            placement = hole_features.CreateSketchPlacementDefinition(_object_collection(app, point_objs))
+            try:
+                feature = _add_hole(hole_features, placement, kind, diameter_cm, hole_dir, depth_mm, through_all,
+                                    counterbore_diameter_mm, counterbore_depth_mm,
+                                    countersink_diameter_mm, countersink_angle_deg)
+            except pywintypes.com_error:
+                if last:
+                    raise
+                continue  # bu yonde Inventor delik olusturmayi reddetti; diger yonu dene
+            if last or feature_is_healthy(document, feature):
+                break
+            delete_feature_keep_sketches(feature)
+
+        ensure_healthy(document, feature, "hole")
+        return {"name": feature.Name, "type": "hole",
+                "direction": "negative" if hole_dir == constants.kNegativeExtentDirection else "positive"}
+
+    def _add_hole(hole_features, placement, kind, diameter_cm, direction, depth_mm, through_all,
+                  counterbore_diameter_mm, counterbore_depth_mm, countersink_diameter_mm, countersink_angle_deg):
         if kind == "simple":
             if through_all:
                 feature = hole_features.AddDrilledByThroughAllExtent(placement, diameter_cm, direction)
@@ -542,10 +591,7 @@ def register(mcp):
             else:
                 depth_cm = mm_to_cm(depth_mm if depth_mm is not None else 1.0)
                 feature = hole_features.AddCSinkByDistanceExtent(placement, diameter_cm, depth_cm, direction, csink_diameter_cm, csink_angle_rad)
-        else:
-            raise LookupError(f"Gecersiz hole_type: '{hole_type}'. Gecerli degerler: simple, counterbore, countersink.")
-
-        return {"name": feature.Name, "type": "hole"}
+        return feature
 
     @mcp.tool()
     @inventor_tool
@@ -574,6 +620,7 @@ def register(mcp):
         else:
             edges = _resolve_edges(app, comp_def, edge_refs)
         feature = comp_def.Features.FilletFeatures.AddSimple(edges, mm_to_cm(radius_mm))
+        ensure_healthy(document, feature, "fillet")
         return {"name": feature.Name, "type": "fillet"}
 
     @mcp.tool()
@@ -588,6 +635,7 @@ def register(mcp):
         comp_def = get_part_component_def(document)
         edges = _resolve_edges(app, comp_def, edge_refs)
         feature = comp_def.Features.ChamferFeatures.AddUsingDistance(edges, mm_to_cm(distance_mm))
+        ensure_healthy(document, feature, "chamfer")
         return {"name": feature.Name, "type": "chamfer"}
 
     @mcp.tool()
@@ -600,6 +648,7 @@ def register(mcp):
         faces = _face_collection(app, [registry.resolve(ref) for ref in face_refs]) if face_refs else app.TransientObjects.CreateFaceCollection()
         shell_def = comp_def.Features.ShellFeatures.CreateShellDefinition(faces, mm_to_cm(thickness_mm), constants.kInsideShellDirection)
         feature = comp_def.Features.ShellFeatures.Add(shell_def)
+        ensure_healthy(document, feature, "shell")
         return {"name": feature.Name, "type": "shell"}
 
     @mcp.tool()
@@ -649,6 +698,7 @@ def register(mcp):
                 XSpacing=mm_to_cm(x_spacing_mm),
                 ComputeType=constants.kIdenticalCompute,
             )
+        ensure_healthy(document, rect_feature, "rectangular_pattern")
         return {"name": rect_feature.Name, "type": "rectangular_pattern"}
 
     @mcp.tool()
@@ -675,6 +725,7 @@ def register(mcp):
         circ_feature = comp_def.Features.CircularPatternFeatures.Add(
             parents, axis_entity, True, count, deg_to_rad(angle_deg), True, constants.kIdenticalCompute
         )
+        ensure_healthy(document, circ_feature, "circular_pattern")
         return {"name": circ_feature.Name, "type": "circular_pattern"}
 
     @mcp.tool()
@@ -696,6 +747,7 @@ def register(mcp):
         plane_obj = _resolve_plane(comp_def, plane_name)
 
         mirror_feature = comp_def.Features.MirrorFeatures.Add(parents, plane_obj)
+        ensure_healthy(document, mirror_feature, "mirror")
         return {"name": mirror_feature.Name, "type": "mirror"}
 
     @mcp.tool()

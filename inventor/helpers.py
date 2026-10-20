@@ -176,6 +176,74 @@ def get_sketch(doc, name: str):
     raise LookupError(f"'{name}' adli sketch bulunamadi.")
 
 
+def has_member(obj, name: str) -> bool:
+    """COM nesneleri icin guvenli hasattr.
+
+    Python'un hasattr'i sadece AttributeError'u yakalar; dinamik (late-bound) bir
+    Inventor nesnesinde olmayan bir uyeye erismek ise pywintypes.com_error
+    ('Member not found', 0x80020003) firlatir ve hasattr bunu disari tasir."""
+    try:
+        getattr(obj, name)
+        return True
+    except (AttributeError, pywintypes.com_error):
+        return False
+
+
+def health_label(status) -> str:
+    """HealthStatusEnum degerini okunur ada cevirir (orn. 11780 -> 'in_error')."""
+    import re
+
+    for d in constants.__dicts__:
+        for n, v in d.items():
+            if v == status and n.startswith("k") and n.endswith("Health"):
+                return re.sub(r"(?<!^)(?=[A-Z])", "_", n[1:-6]).lower()
+    return str(status)
+
+
+_OK_HEALTH = ("kUpToDateHealth", "kSuppressedHealth", "kBeyondStopNodeHealth", "kNewlyAddedHealth")
+
+
+def feature_is_healthy(document, feature) -> bool:
+    """Dokumani gunceller ve feature'in Inventor tarafindan saglikli kabul edilip
+    edilmedigini dondurur. HealthStatus okunamayan nesnelerde True kabul edilir."""
+    try:
+        document.Update()
+    except pywintypes.com_error:
+        pass
+    try:
+        status = feature.HealthStatus
+    except (pywintypes.com_error, AttributeError):
+        return True
+    return status in {getattr(constants, n) for n in _OK_HEALTH if hasattr(constants, n)}
+
+
+def delete_feature_keep_sketches(feature) -> None:
+    """Feature'i siler; tukettigi sketch'leri ve bagli is elemanlarini korur."""
+    try:
+        feature.Delete(True, True, True)
+    except (pywintypes.com_error, AttributeError, TypeError):
+        try:
+            feature.Delete()
+        except (pywintypes.com_error, AttributeError):
+            pass
+
+
+def ensure_healthy(document, feature, what: str = "feature"):
+    """Inventor bazen bir feature'i olusturur ama HATALI (in_error vb.) isaretler ve
+    hicbir geometri degismez; API cagrisi yine de basarili doner. Bu fonksiyon boyle
+    bir feature'i geri alir (sketch'leri korur) ve acik bir hata firlatir, boylece
+    tool sessizce 'basarili' donmez. Saglikliysa feature'i aynen dondurur."""
+    if feature_is_healthy(document, feature):
+        return feature
+    name = getattr(feature, "Name", "?")
+    label = health_label(feature.HealthStatus)
+    delete_feature_keep_sketches(feature)
+    raise RuntimeError(
+        f"Inventor {what} '{name}' olusturdu ama hatali isaretledi ({label}); feature geri alindi "
+        "(sketch'ler korundu). Geometriyi, yonu ve secilen referanslari kontrol edin."
+    )
+
+
 def count_closed_regions(sk) -> int:
     """Sketch'teki kapali bolge (profil yolu) sayisini dondurur.
 

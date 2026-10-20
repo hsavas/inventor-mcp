@@ -16,8 +16,8 @@
 - `affected_bodies` argument for `inventor_extrude` and `inventor_revolve`, so
   join/cut/intersect can target specific bodies in multi-body parts. *(Sam-H101)*
 - `units` argument for `inventor_create_parameter`. *(Sam-H101)*
-- Automated tests tracked in the repo: `tests/functional_test.py` (end-to-end, 32
-  checks) and `tests/check_single_instance.py`; see "Testing" in the README.
+- Automated tests tracked in the repo: `tests/functional_test.py` (end-to-end,
+  all 109 tools) and `tests/check_single_instance.py`; see "Testing" in the README.
 - `preserve_position` result reports `flips_changed` when the requested flips
   were changed to keep parts in place.
 
@@ -33,6 +33,33 @@
   starting.
 - A failed position-preserving joint attempt no longer leaves a temporary
   joint behind in the assembly.
+- **Feature tools no longer report success for broken features.** Inventor can
+  create a feature (hole, mirror, pattern, ...) that it marks as failed and that
+  changes nothing; all 16 feature-creating tools now check the result, undo a
+  failed feature (keeping its sketches) and return a clear error.
+- `inventor_hole` drilled in a fixed direction, so a hole sketched on a plane on
+  top of the part always failed. New `direction` argument (default `"auto"`
+  finds the direction into the material; `"negative"`/`"positive"` force one).
+- `inventor_set_parameter` now rebuilds the model; before, the value changed but
+  the geometry did not.
+- `inventor_sketch_add_dimension` now re-solves the sketch, so the geometry
+  actually takes the dimension value; `linear` also accepts a single line (its
+  length).
+- `inventor_sketch_add_rectangle_three_point` now creates a closed profile.
+- `inventor_sketch_mirror` (and other sketch helpers) failed on circles with
+  "Member not found": entities were cast to the line interface regardless of
+  their real type.
+- `inventor_set_iproperty` creates a custom (User Defined) property that does
+  not exist yet.
+- `inventor_set_appearance` accepts the internal names returned by
+  `inventor_list_appearances`, and a custom colour works for an appearance that
+  is already used in the document.
+- `inventor_export`: never shows a dialog (Inventor's SilentOperation), so an
+  export can no longer block the server; DWG export works (translator is loaded
+  and ZIP packaging is turned off), and multi-sheet drawings return one file
+  per sheet in `files`.
+- Test suite now exercises all 109 tools (108 checks) and fails if any tool is
+  not called.
 
 ### Changed
 - The Inventor type library version is read from the registry instead of being

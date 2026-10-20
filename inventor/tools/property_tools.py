@@ -15,6 +15,9 @@ def _json_safe(value):
     return value
 
 
+USER_DEFINED_PROPSET_ID = "{D5CDD505-2E9C-101B-9397-08002B2CF9AE}"  # "Inventor User Defined Properties"
+
+
 def _resolve_property_set(doc, propset: str):
     propset_lower = propset.lower()
     for ps in doc.PropertySets:
@@ -52,17 +55,24 @@ def register(mcp):
 
         propset: 'Summary Information', 'Document Summary Information',
         'Design Tracking Properties' veya 'User Defined Properties' (DisplayName veya
-        internal Name kabul edilir).
+        internal Name kabul edilir). 'User Defined Properties' icinde olmayan bir ad
+        verilirse yeni ozel ozellik olusturulur (sonucta created=True).
         """
         app = get_app()
         document = get_document(app, doc)
         ps = _resolve_property_set(document, propset)
+        created = False
         try:
             prop = ps.Item(name)
+            prop.Value = value
         except pywintypes.com_error:
-            raise LookupError(f"'{name}' adli ozellik '{ps.DisplayName}' icinde bulunamadi.")
-        prop.Value = value
-        return {"propset": ps.DisplayName, "name": prop.Name, "value": _json_safe(prop.Value)}
+            # Ozel (User Defined) ozellikler ilk kez ayarlandiginda olusturulur - UI'daki
+            # iProperties > Custom ile ayni davranis. Yerlesik setlere yeni ozellik eklenemez.
+            if ps.InternalName != USER_DEFINED_PROPSET_ID:
+                raise LookupError(f"'{name}' adli ozellik '{ps.DisplayName}' icinde bulunamadi.") from None
+            prop = ps.Add(value, name)
+            created = True
+        return {"propset": ps.DisplayName, "name": prop.Name, "value": _json_safe(prop.Value), "created": created}
 
     @mcp.tool()
     @inventor_tool

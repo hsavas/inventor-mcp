@@ -9,6 +9,7 @@ from win32com.client import CastTo, constants
 from inventor import registry
 from inventor.connection import get_app
 from inventor.helpers import (
+    has_member,
     count_closed_regions,
     get_document,
     get_part_component_def,
@@ -96,7 +97,7 @@ def _add_constraint(geo_constraints, kind: str, entities: list):
 
 def _entity_point(entity):
     """Bir entity'den bir SketchPoint dondurur (SketchLine ise baslangic noktasi)."""
-    if hasattr(entity, "StartSketchPoint"):
+    if has_member(entity, "StartSketchPoint"):
         return entity.StartSketchPoint
     return entity
 
@@ -213,20 +214,39 @@ def _reflect_point(px: float, py: float, x1: float, y1: float, x2: float, y2: fl
 
 def _as_concrete_entity(entity):
     """AddAsTwoPointRectangle gibi metotlar generic 'SketchEntity' tipinde nesneler
-    dondurebilir (StartSketchPoint gibi alt-tip ozelliklerini gostermez); somut
-    SketchLine/SketchArc arayuzune CastTo ile gecis yapar."""
-    for type_name in ("SketchLine", "SketchArc"):
-        try:
-            return CastTo(entity, type_name)
-        except (pywintypes.com_error, TypeError):
-            continue
+    dondurebilir (StartSketchPoint gibi alt-tip ozelliklerini gostermez); nesnenin
+    GERCEK turune (entity.Type) gore somut arayuze CastTo ile gecis yapar.
+
+    Not: CastTo turu dogrulamaz - bir daireyi 'SketchLine'a cevirmek de "basarili"
+    olur ve sonra StartSketchPoint erisimi 'Member not found' verir. Bu yuzden once
+    Type okunur."""
+    try:
+        entity_type = entity.Type
+    except (pywintypes.com_error, AttributeError):
+        return entity
+    for const_name, type_name in _CONCRETE_SKETCH_TYPES:
+        if entity_type == getattr(constants, const_name, None):
+            try:
+                return CastTo(entity, type_name)
+            except (pywintypes.com_error, TypeError):
+                return entity
     return entity
+
+
+_CONCRETE_SKETCH_TYPES = (
+    ("kSketchLineObject", "SketchLine"),
+    ("kSketchArcObject", "SketchArc"),
+    ("kSketchCircleObject", "SketchCircle"),
+    ("kSketchEllipseObject", "SketchEllipse"),
+    ("kSketchPointObject", "SketchPoint"),
+    ("kSketchSplineObject", "SketchSpline"),
+)
 
 
 def _entity_endpoints(entity):
     """Bir line/arc entity'sinin uc SketchPoint'lerini dondurur."""
     entity = _as_concrete_entity(entity)
-    if hasattr(entity, "StartSketchPoint"):
+    if has_member(entity, "StartSketchPoint"):
         return [entity.StartSketchPoint, entity.EndSketchPoint]
     return [entity]
 
@@ -240,7 +260,7 @@ def _entity_midpoint(app, entity):
     noktasi (kesinlikle 'korunacak' tarafta) guvenilir sonuc verir.
     """
     entity = _as_concrete_entity(entity)
-    if hasattr(entity, "StartSketchPoint"):
+    if has_member(entity, "StartSketchPoint"):
         g1 = entity.StartSketchPoint.Geometry
         g2 = entity.EndSketchPoint.Geometry
         return point2d(app, cm_to_mm((g1.X + g2.X) / 2), cm_to_mm((g1.Y + g2.Y) / 2))
@@ -396,12 +416,10 @@ def register(mcp):
         p4 = (x1 + nx, y1 + ny)
         corners = [p1, p2, p3, p4]
 
-        lines = []
-        for i in range(4):
-            ax, ay = corners[i]
-            bx, by = corners[(i + 1) % 4]
-            line = sk.SketchLines.AddByTwoPoints(point2d(app, ax, ay), point2d(app, bx, by))
-            lines.append(line)
+        # Bagimsiz AddByTwoPoints cizgileri kose noktalarini paylasmaz ve kapali profil
+        # olusturmaz (finish_sketch -> closed_regions: 0); polygon/polyline ile ayni
+        # zincirleme yontemi kullaniliyor.
+        lines = _add_closed_polyline(app, sk, corners)
         entity_ids = [registry.register(document.DisplayName, sk.Name, "line", line) for line in lines]
         return {"entity_ids": entity_ids, "corners": [list(p1), list(p2), list(p3), list(p4)]}
 
@@ -618,7 +636,7 @@ def register(mcp):
     ) -> dict:
         """Sketch entity'lerine boyut kisitlamasi ekler ve degerini ayarlar.
 
-        type: 'linear' (2 nokta/cizgi arasi mesafe, mm), 'radius' (1 daire/yay, mm),
+        type: 'linear' (1 cizginin uzunlugu veya 2 nokta/cizgi arasi mesafe, mm), 'radius' (1 daire/yay, mm),
         'diameter' (1 daire, mm), 'angle' (2 cizgi arasi aci, derece).
         """
         app = get_app()
@@ -630,9 +648,13 @@ def register(mcp):
         entities = [registry.resolve(eid) for eid in entity_ids]
 
         if kind == "linear":
-            if len(entities) != 2:
-                raise LookupError("'linear' boyutu 2 entity (nokta veya cizgi) gerektirir.")
-            p1, p2 = _entity_point(entities[0]), _entity_point(entities[1])
+            if len(entities) == 1 and has_member(entities[0], "StartSketchPoint"):
+                # Tek cizgi: cizginin kendi uzunlugu (uc noktalari arasi mesafe).
+                p1, p2 = entities[0].StartSketchPoint, entities[0].EndSketchPoint
+            elif len(entities) == 2:
+                p1, p2 = _entity_point(entities[0]), _entity_point(entities[1])
+            else:
+                raise LookupError("'linear' boyutu 1 cizgi (uzunlugu) veya 2 entity (nokta/cizgi arasi) gerektirir.")
             text_point = _midpoint_text_point(app, p1, p2)
             constraint = dims.AddTwoPointDistance(p1, p2, constants.kAlignedDim, text_point)
             constraint.Parameter.Value = mm_to_cm(value)
@@ -654,7 +676,18 @@ def register(mcp):
         else:
             raise LookupError(f"Gecersiz boyut turu: '{type}'. Gecerli turler: linear, radius, diameter, angle.")
 
-        return {"sketch": sk.Name, "dimension": kind, "value": value, "parameter": constraint.Parameter.Name}
+        # Parametre degeri atanir ama sketch kendiliginden yeniden cozulmez: Solve
+        # olmadan geometri eski olcude kalir (orn. 10.2 mm cizgi 15 mm olmaz).
+        try:
+            sk.Solve()
+        except (pywintypes.com_error, AttributeError):
+            pass
+        try:
+            document.Update()
+        except pywintypes.com_error:
+            pass
+        return {"sketch": sk.Name, "dimension": kind, "value": value, "parameter": constraint.Parameter.Name,
+                "driven": bool(getattr(constraint, "Driven", False))}
 
     @mcp.tool()
     @inventor_tool
@@ -749,7 +782,7 @@ def register(mcp):
         new_ids = []
         for eid in entity_ids:
             entity = _as_concrete_entity(registry.resolve(eid))
-            if hasattr(entity, "StartSketchPoint") and hasattr(entity, "CenterSketchPoint"):
+            if has_member(entity, "StartSketchPoint") and has_member(entity, "CenterSketchPoint"):
                 # Arc: merkez + uc noktalari yansit; yon tersine donecegi icin
                 # baslangic/bitis noktalarini takas ederek doğru sarmal/sweep
                 # yonunu koru.
@@ -763,7 +796,7 @@ def register(mcp):
                     point2d(app, *rc), point2d(app, *re), point2d(app, *rs)
                 )
                 kind = "arc"
-            elif hasattr(entity, "StartSketchPoint"):
+            elif has_member(entity, "StartSketchPoint"):
                 # Line
                 sp = entity.StartSketchPoint.Geometry
                 ep = entity.EndSketchPoint.Geometry
@@ -771,7 +804,7 @@ def register(mcp):
                 re = _reflect_point(cm_to_mm(ep.X), cm_to_mm(ep.Y), x1, y1, x2, y2)
                 new_entity = sk.SketchLines.AddByTwoPoints(point2d(app, *rs), point2d(app, *re))
                 kind = "line"
-            elif hasattr(entity, "CenterSketchPoint"):
+            elif has_member(entity, "CenterSketchPoint"):
                 # Circle
                 c = entity.CenterSketchPoint.Geometry
                 rc = _reflect_point(cm_to_mm(c.X), cm_to_mm(c.Y), x1, y1, x2, y2)
